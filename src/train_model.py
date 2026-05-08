@@ -93,6 +93,12 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     # credit is ordinal (low < medium < high) — encode numerically so the
     # model can learn monotone relationships, not just arbitrary splits.
     df["credit_ordinal"] = df["credit"].map(CREDIT_ORDINAL)
+    # Long tenure × high credit = loyal; short tenure × low credit = cancel risk
+    df["tenure_x_credit"] = df["log_tenure"] * df["credit_ordinal"].fillna(1)
+    # Frequent mover relative to tenure signals instability
+    df["res_tenure_ratio"] = df["len.at.res"].fillna(0) / (df["tenure"].fillna(0) + 1)
+    # Premium burden relative to credit quality — price-stressed customers cancel
+    df["premium_credit_stress"] = df["premium"].fillna(0) / (df["credit_ordinal"].fillna(0) + 1)
     # Convert zip.code to string so LightGBM treats it as categorical (nominal),
     # not numeric. Must happen after add_group_features (which merges on float zip).
     df["zip.code"] = df["zip.code"].astype("string")
@@ -120,6 +126,16 @@ def add_group_features(df: pd.DataFrame, ref: pd.DataFrame) -> pd.DataFrame:
     df = df.merge(credit_med, on="credit", how="left")
     df["premium_vs_credit"] = df["premium"].fillna(0) / df["_cred_prem_med"].replace(0, np.nan)
     df = df.drop(columns=["_cred_prem_med"])
+
+    # Premium relative to dwelling-type median
+    dwell_med = (
+        ref.groupby("dwelling.type")["premium"].median()
+        .reset_index()
+        .rename(columns={"premium": "_dwell_prem_med"})
+    )
+    df = df.merge(dwell_med, on="dwelling.type", how="left")
+    df["premium_vs_dwelling"] = df["premium"].fillna(0) / df["_dwell_prem_med"].replace(0, np.nan)
+    df = df.drop(columns=["_dwell_prem_med"])
 
     return df
 
@@ -230,8 +246,22 @@ def main():
         fold_scores.append(fold_acc)
         log(f"  Fold {fold + 1} accuracy: {fold_acc:.5f}  (best iter: {model.best_iteration})", t0)
 
-    # Aggregate results
-    oof_class = oof_preds.argmax(axis=1)
+    # Threshold tuning for class 2 — grid search on OOF predictions.
+    # The model systematically underestimates P(cancel=2), so lowering
+    # the decision threshold for class 2 can recover misclassified rows.
+    best_t2, best_acc_t2 = 0.333, 0.0
+    for t2 in np.arange(0.10, 0.61, 0.01):
+        pred_t = np.where(oof_preds[:, 2] >= t2, 2, oof_preds[:, :2].argmax(axis=1))
+        acc_t = accuracy_score(y, pred_t)
+        if acc_t > best_acc_t2:
+            best_acc_t2 = acc_t
+            best_t2 = t2
+    log(f"Best class-2 threshold: {best_t2:.2f}  OOF accuracy: {best_acc_t2:.5f}", t0)
+
+    # Apply tuned threshold to final predictions
+    oof_class = np.where(oof_preds[:, 2] >= best_t2, 2, oof_preds[:, :2].argmax(axis=1))
+    test_class = np.where(test_preds[:, 2] >= best_t2, 2, test_preds[:, :2].argmax(axis=1))
+
     overall_acc = accuracy_score(y, oof_class)
     cm = confusion_matrix(y, oof_class)
 
@@ -256,7 +286,7 @@ def main():
 
     (OUTPUT_DIR / "cv_results.txt").write_text("\n".join(summary))
 
-    sub = pd.DataFrame({"Id": test_ids, "Predicted": test_preds.argmax(axis=1)})
+    sub = pd.DataFrame({"Id": test_ids, "Predicted": test_class})
     sub.to_csv(OUTPUT_DIR / "submission.csv", index=False)
     log(f"Saved submission to {OUTPUT_DIR / 'submission.csv'}", t0)
     log(f"Total runtime: {time.time() - t0:.0f}s", t0)
