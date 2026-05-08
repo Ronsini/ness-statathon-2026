@@ -35,6 +35,22 @@ RANDOM_STATE = 42
 N_ROUNDS = 5000
 EARLY_STOPPING = 100
 
+# Update this every branch so results_log.txt stays self-documenting
+ATTEMPT_LABEL = "improve/attempt-3"
+ATTEMPT_NOTES = """
+Changes vs attempt-2:
+  - 4 new features: tenure_x_credit, res_tenure_ratio, premium_credit_stress,
+    premium_vs_dwelling (42 features total, up from 38)
+  - Class-2 threshold tuning via OOF grid search (t2 in 0.10-0.60)
+
+Why it should help:
+  - Class 2 recall was stuck at 26% across all prior runs. The new features
+    target the two strongest cancel signals: financial pressure (high premium
+    relative to credit quality) and mobility (frequent moves relative to tenure).
+  - Threshold tuning recovers misclassified class-2 rows without retraining —
+    the model underestimates P(cancel=2), so we lower when we call it class 2.
+"""
+
 LGB_PARAMS = {
     "objective": "multiclass",
     "num_class": 3,
@@ -285,6 +301,22 @@ def main():
     print("\n" + "\n".join(summary))
 
     (OUTPUT_DIR / "cv_results.txt").write_text("\n".join(summary))
+
+    # Append to cumulative results log so every attempt is preserved
+    import datetime
+    log_path = OUTPUT_DIR / "results_log.txt"
+    entry = "\n".join([
+        "=" * 72,
+        f"Attempt : {ATTEMPT_LABEL}",
+        f"Date    : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"Runtime : {time.time() - t0:.0f}s",
+        ATTEMPT_NOTES.strip(),
+        "-" * 72,
+        *summary,
+        "",
+    ])
+    with open(log_path, "a") as f:
+        f.write(entry + "\n")
 
     sub = pd.DataFrame({"Id": test_ids, "Predicted": test_class})
     sub.to_csv(OUTPUT_DIR / "submission.csv", index=False)

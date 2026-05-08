@@ -23,10 +23,10 @@ env/
 .DS_Store
 Thumbs.db
 
-# Outputs (keep submission.csv but not models)
+# Outputs (keep submission.csv and results log, not models/scratch)
 output/*.pkl
 output/*.lgb
-output/*.txt
+output/cv_results.txt
 
 # Logs
 *.log
