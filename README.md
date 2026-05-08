@@ -60,6 +60,7 @@ python src/make_submission.py  # generate submission.csv in output/
 | `main` | Naive baseline (predict all 0) | 0.7099 | — |
 | `main` | LightGBM baseline (300k sample) | 0.7257 | num_leaves=31, lr=0.1, 300 rounds |
 | `improve/full-data-tuned` | LightGBM (full 1M rows) | 0.7253 | num_leaves=255, lr=0.05, early stop ~350-480 rounds, 37 features incl. zip categorical + group ratios |
+| `improve/slower-deeper-oof-encoding` | LightGBM (slower, deeper) | 0.7260 | num_leaves=127, lr=0.02, early stop ~1780-2102 rounds, 38 features incl. OOF zip encoding + credit ordinal |
 
 ## Team
 
