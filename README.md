@@ -55,11 +55,11 @@ python src/make_submission.py  # generate submission.csv in output/
 
 ## Current Results
 
-| Model                          | 5-fold CV Accuracy |
-|--------------------------------|--------------------|
-| Naive baseline (predict all 0) | 0.7099             |
-| LightGBM (subsampled 300k)     | 0.7257             |
-| LightGBM (full 1M, tuned)      | _to be added_      |
+| Branch | Model | 5-fold CV Accuracy | Notes |
+|--------|-------|--------------------|-------|
+| `main` | Naive baseline (predict all 0) | 0.7099 | — |
+| `main` | LightGBM baseline (300k sample) | 0.7257 | num_leaves=31, lr=0.1, 300 rounds |
+| `improve/full-data-tuned` | LightGBM (full 1M rows) | 0.7253 | num_leaves=255, lr=0.05, early stop ~350-480 rounds, 37 features incl. zip categorical + group ratios |
 
 ## Team
 
