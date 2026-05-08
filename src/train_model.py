@@ -32,16 +32,16 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 SAMPLE_N = None  # None = full 1M rows; set an int to subsample for quick iteration
 N_FOLDS = 5
 RANDOM_STATE = 42
-N_ROUNDS = 3000
-EARLY_STOPPING = 50
+N_ROUNDS = 5000
+EARLY_STOPPING = 100
 
 LGB_PARAMS = {
     "objective": "multiclass",
     "num_class": 3,
     "metric": "multi_logloss",
-    "learning_rate": 0.05,
-    "num_leaves": 255,
-    "min_data_in_leaf": 50,
+    "learning_rate": 0.02,
+    "num_leaves": 127,
+    "min_data_in_leaf": 30,
     "feature_fraction": 0.8,
     "bagging_fraction": 0.8,
     "bagging_freq": 5,
@@ -67,6 +67,9 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     return train, test
 
 
+CREDIT_ORDINAL = {"low": 0, "medium": 1, "high": 2}
+
+
 def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     """Row-level features — no cross-row statistics needed."""
     df["household_size"] = df["n.adults"].fillna(0) + df["n.children"].fillna(0)
@@ -87,6 +90,9 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     ).astype(int)
     df["windows_per_sqft"] = df["num_windows_front"] / df["square_footage"].replace(0, np.nan)
     df["long_resident"] = (df["len.at.res"].fillna(0) > 10).astype(int)
+    # credit is ordinal (low < medium < high) — encode numerically so the
+    # model can learn monotone relationships, not just arbitrary splits.
+    df["credit_ordinal"] = df["credit"].map(CREDIT_ORDINAL)
     # Convert zip.code to string so LightGBM treats it as categorical (nominal),
     # not numeric. Must happen after add_group_features (which merges on float zip).
     df["zip.code"] = df["zip.code"].astype("string")
@@ -173,10 +179,35 @@ def main():
     test_preds = np.zeros((len(X_test), 3))
     fold_scores = []
 
+    # Placeholder columns for OOF zip target encoding (filled per fold)
+    X["zip_cancel2_rate"] = np.nan
+    X_test["zip_cancel2_rate"] = np.nan
+    zip_test_accum = np.zeros(len(X_test))  # average across folds for test
+
     for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y)):
         log(f"Fold {fold + 1}/{N_FOLDS}...", t0)
-        X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
         y_tr, y_va = y[tr_idx], y[va_idx]
+
+        # OOF target encoding: smoothed fraction of cancel==2 per zip,
+        # computed from training fold only to avoid leakage on val/test.
+        # At ~2600 rows per zip in the training fold, the self-inclusion
+        # leakage for training rows is ~0.04% — negligible.
+        global_rate = (y_tr == 2).mean()
+        zip_rates = (
+            pd.DataFrame({"zip": X.iloc[tr_idx]["zip.code"].values, "is2": (y_tr == 2).astype(float)})
+            .groupby("zip")["is2"]
+            .agg(["sum", "count"])
+        )
+        smooth_k = 20
+        zip_rates["rate"] = (zip_rates["sum"] + smooth_k * global_rate) / (zip_rates["count"] + smooth_k)
+        zip_map = zip_rates["rate"].to_dict()
+
+        X.loc[tr_idx, "zip_cancel2_rate"] = X.iloc[tr_idx]["zip.code"].map(zip_map).fillna(global_rate).values
+        X.loc[va_idx, "zip_cancel2_rate"] = X.iloc[va_idx]["zip.code"].map(zip_map).fillna(global_rate).values
+        zip_test_accum += X_test["zip.code"].map(zip_map).fillna(global_rate).values
+        X_test["zip_cancel2_rate"] = zip_test_accum / (fold + 1)
+
+        X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
 
         dtr = lgb.Dataset(X_tr, y_tr, categorical_feature=cat_cols)
         dva = lgb.Dataset(X_va, y_va, categorical_feature=cat_cols, reference=dtr)
