@@ -32,7 +32,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 SAMPLE_N = None  # None = full 1M rows; set an int to subsample for quick iteration
 N_FOLDS = 5
 RANDOM_STATE = 42
-N_ROUNDS = 2000
+N_ROUNDS = 3000
 EARLY_STOPPING = 50
 
 LGB_PARAMS = {
@@ -87,6 +87,9 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     ).astype(int)
     df["windows_per_sqft"] = df["num_windows_front"] / df["square_footage"].replace(0, np.nan)
     df["long_resident"] = (df["len.at.res"].fillna(0) > 10).astype(int)
+    # Convert zip.code to string so LightGBM treats it as categorical (nominal),
+    # not numeric. Must happen after add_group_features (which merges on float zip).
+    df["zip.code"] = df["zip.code"].astype("string")
     return df
 
 
