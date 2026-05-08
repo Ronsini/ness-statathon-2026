@@ -193,8 +193,10 @@ def main():
         # At ~2600 rows per zip in the training fold, the self-inclusion
         # leakage for training rows is ~0.04% — negligible.
         global_rate = (y_tr == 2).mean()
+        # Cast to str to avoid Categorical dtype interfering with map/fillna
+        tr_zips = X.iloc[tr_idx]["zip.code"].astype(str)
         zip_rates = (
-            pd.DataFrame({"zip": X.iloc[tr_idx]["zip.code"].values, "is2": (y_tr == 2).astype(float)})
+            pd.DataFrame({"zip": tr_zips.values, "is2": (y_tr == 2).astype(float)})
             .groupby("zip")["is2"]
             .agg(["sum", "count"])
         )
@@ -202,9 +204,9 @@ def main():
         zip_rates["rate"] = (zip_rates["sum"] + smooth_k * global_rate) / (zip_rates["count"] + smooth_k)
         zip_map = zip_rates["rate"].to_dict()
 
-        X.loc[tr_idx, "zip_cancel2_rate"] = X.iloc[tr_idx]["zip.code"].map(zip_map).fillna(global_rate).values
-        X.loc[va_idx, "zip_cancel2_rate"] = X.iloc[va_idx]["zip.code"].map(zip_map).fillna(global_rate).values
-        zip_test_accum += X_test["zip.code"].map(zip_map).fillna(global_rate).values
+        X.loc[tr_idx, "zip_cancel2_rate"] = X.iloc[tr_idx]["zip.code"].astype(str).map(zip_map).fillna(global_rate).values
+        X.loc[va_idx, "zip_cancel2_rate"] = X.iloc[va_idx]["zip.code"].astype(str).map(zip_map).fillna(global_rate).values
+        zip_test_accum += X_test["zip.code"].astype(str).map(zip_map).fillna(global_rate).values
         X_test["zip_cancel2_rate"] = zip_test_accum / (fold + 1)
 
         X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
