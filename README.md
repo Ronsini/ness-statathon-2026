@@ -63,4 +63,4 @@ python src/make_submission.py  # generate submission.csv in output/
 
 ## Team
 
-UConn Huskies — NESS Statathon 2026
+Ronsini — NESS Statathon 2026
