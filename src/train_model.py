@@ -1,6 +1,6 @@
 """
 NESS Statathon 2026 — Policy Retention Model
-Main training pipeline: 5-fold stratified cross-validation with LightGBM.
+Training pipeline: 5-fold stratified CV with LightGBM on the full 1M-row dataset.
 
 Outputs:
   - output/submission.csv        Kaggle submission file
@@ -29,21 +29,23 @@ DATA_DIR = PROJECT_ROOT / "data"
 OUTPUT_DIR = PROJECT_ROOT / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Training subsample size. Set to None to use all rows (slower but higher accuracy).
-SAMPLE_N = 300_000
+SAMPLE_N = None  # None = full 1M rows; set an int to subsample for quick iteration
 N_FOLDS = 5
 RANDOM_STATE = 42
+N_ROUNDS = 2000
+EARLY_STOPPING = 50
 
 LGB_PARAMS = {
     "objective": "multiclass",
     "num_class": 3,
     "metric": "multi_logloss",
-    "learning_rate": 0.1,
-    "num_leaves": 31,
-    "min_data_in_leaf": 200,
+    "learning_rate": 0.05,
+    "num_leaves": 255,
+    "min_data_in_leaf": 50,
     "feature_fraction": 0.8,
     "bagging_fraction": 0.8,
     "bagging_freq": 5,
+    "lambda_l1": 0.1,
     "lambda_l2": 1.0,
     "verbose": -1,
     "n_jobs": -1,
@@ -55,21 +57,18 @@ LGB_PARAMS = {
 # -----------------------------------------------------------------------------
 
 def log(msg: str, t0: float) -> None:
-    """Print a timestamped message."""
     print(f"[{time.time() - t0:6.0f}s] {msg}", flush=True)
 
 
 def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load train and test CSVs from data/, drop the rare cancel=-1 rows from train."""
     train = pd.read_csv(DATA_DIR / "train.csv")
     test = pd.read_csv(DATA_DIR / "test.csv")
-    # ~0.3% of rows have cancel = -1 (likely data quality issue) — drop them
     train = train[train["cancel"].isin([0, 1, 2])].reset_index(drop=True)
     return train, test
 
 
 def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add domain-driven features. Modifies df in place and returns it."""
+    """Row-level features — no cross-row statistics needed."""
     df["household_size"] = df["n.adults"].fillna(0) + df["n.children"].fillna(0)
     df["has_children"] = (df["n.children"].fillna(0) > 0).astype(int)
     df["premium_per_sqft"] = df["premium"] / df["square_footage"].replace(0, np.nan)
@@ -78,14 +77,47 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
         (df["ni.age"].fillna(99) < 30) & (df["claim.ind"].fillna(0) == 1)
     ).astype(int)
     df["new_customer"] = (df["tenure"].fillna(99) < 3).astype(int)
+    df["log_premium"] = np.log1p(df["premium"].fillna(0))
+    df["log_tenure"] = np.log1p(df["tenure"].fillna(0))
+    df["log_square_footage"] = np.log1p(df["square_footage"].fillna(0))
+    df["premium_x_claim"] = df["premium"].fillna(0) * df["claim.ind"].fillna(0)
+    df["age_x_tenure"] = df["ni.age"].fillna(0) * df["tenure"].fillna(0)
+    df["is_married_adult"] = (
+        (df["ni.marital.status"].fillna(0) == 1) & (df["n.adults"].fillna(0) >= 2)
+    ).astype(int)
+    df["windows_per_sqft"] = df["num_windows_front"] / df["square_footage"].replace(0, np.nan)
+    df["long_resident"] = (df["len.at.res"].fillna(0) > 10).astype(int)
+    return df
+
+
+def add_group_features(df: pd.DataFrame, ref: pd.DataFrame) -> pd.DataFrame:
+    """Group-level statistics computed on `ref` (training data), merged into `df`."""
+    # Premium relative to zip-code median
+    zip_med = (
+        ref.groupby("zip.code")["premium"].median()
+        .reset_index()
+        .rename(columns={"premium": "_zip_prem_med"})
+    )
+    df = df.merge(zip_med, on="zip.code", how="left")
+    df["premium_vs_zip"] = df["premium"].fillna(0) / df["_zip_prem_med"].replace(0, np.nan)
+    df = df.drop(columns=["_zip_prem_med"])
+
+    # Premium relative to credit-tier median
+    credit_med = (
+        ref.groupby("credit")["premium"].median()
+        .reset_index()
+        .rename(columns={"premium": "_cred_prem_med"})
+    )
+    df = df.merge(credit_med, on="credit", how="left")
+    df["premium_vs_credit"] = df["premium"].fillna(0) / df["_cred_prem_med"].replace(0, np.nan)
+    df = df.drop(columns=["_cred_prem_med"])
+
     return df
 
 
 def align_categoricals(
     X: pd.DataFrame, X_test: pd.DataFrame, cat_cols: list[str]
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Convert categorical columns to pandas Categorical with shared categories
-    across train and test. LightGBM uses these natively."""
     for c in cat_cols:
         combined = pd.concat(
             [X[c].astype("string"), X_test[c].astype("string")], ignore_index=True
@@ -106,7 +138,6 @@ def main():
     train, test = load_data()
     log(f"Train rows: {len(train):,}  Test rows: {len(test):,}", t0)
 
-    # Optional subsample for faster iteration
     if SAMPLE_N is not None and SAMPLE_N < len(train):
         train = train.sample(n=SAMPLE_N, random_state=RANDOM_STATE).reset_index(drop=True)
         log(f"Subsampled to {len(train):,} rows", t0)
@@ -117,16 +148,20 @@ def main():
     X = train.drop(columns=["id", "cancel"])
     X_test = test.drop(columns=["id"])
 
-    # Identify categorical columns
-    cat_cols = X.select_dtypes(include=["object", "string"]).columns.tolist()
-    log(f"Categorical columns: {cat_cols}", t0)
+    # Group features — computed on full training set to give stable statistics
+    log("Adding group features...", t0)
+    X = add_group_features(X, X)
+    X_test = add_group_features(X_test, X)
 
-    # Align categories across train/test so test doesn't fail on unseen levels
-    X, X_test = align_categoricals(X, X_test, cat_cols)
-
-    # Feature engineering
+    # Row-level feature engineering
     X = add_engineered_features(X)
     X_test = add_engineered_features(X_test)
+
+    # Align categoricals
+    cat_cols = X.select_dtypes(include=["object", "string"]).columns.tolist()
+    log(f"Categorical columns: {cat_cols}", t0)
+    X, X_test = align_categoricals(X, X_test, cat_cols)
+
     log(f"Total features: {X.shape[1]}", t0)
 
     # 5-fold stratified CV
@@ -146,9 +181,9 @@ def main():
         model = lgb.train(
             LGB_PARAMS,
             dtr,
-            num_boost_round=300,
+            num_boost_round=N_ROUNDS,
             valid_sets=[dva],
-            callbacks=[lgb.early_stopping(30), lgb.log_evaluation(0)],
+            callbacks=[lgb.early_stopping(EARLY_STOPPING), lgb.log_evaluation(100)],
         )
 
         va_pred = model.predict(X_va, num_iteration=model.best_iteration)
@@ -157,7 +192,7 @@ def main():
 
         fold_acc = accuracy_score(y_va, va_pred.argmax(axis=1))
         fold_scores.append(fold_acc)
-        log(f"  Fold {fold + 1} accuracy: {fold_acc:.5f}", t0)
+        log(f"  Fold {fold + 1} accuracy: {fold_acc:.5f}  (best iter: {model.best_iteration})", t0)
 
     # Aggregate results
     oof_class = oof_preds.argmax(axis=1)
@@ -183,10 +218,8 @@ def main():
     )
     print("\n" + "\n".join(summary))
 
-    # Save CV results
     (OUTPUT_DIR / "cv_results.txt").write_text("\n".join(summary))
 
-    # Save submission
     sub = pd.DataFrame({"Id": test_ids, "Predicted": test_preds.argmax(axis=1)})
     sub.to_csv(OUTPUT_DIR / "submission.csv", index=False)
     log(f"Saved submission to {OUTPUT_DIR / 'submission.csv'}", t0)
