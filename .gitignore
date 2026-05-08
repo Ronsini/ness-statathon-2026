@@ -1,0 +1,32 @@
+# Data files (large, available from Kaggle)
+data/*.csv
+data/*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+.python-version
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Outputs (keep submission.csv but not models)
+output/*.pkl
+output/*.lgb
+output/*.txt
+
+# Logs
+*.log
