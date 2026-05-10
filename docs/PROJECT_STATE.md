@@ -56,10 +56,13 @@ attempt-1: PASS  baseline — LightGBM on 300k subsample (0.72570)
   over no weights (attempt-5 vs attempt-3).
 - **c2×0.65 optimal multiplier means class-2 weight of 1.5 is ~35% too high.**
   The model is over-predicting class-2, and tuning compensates by scaling it down.
-  For attempt-6: reduce class-2 weight toward 1.1–1.2 so raw probabilities are
-  better calibrated and the tuned multiplier lands closer to 1.0.
 - **N_ROUNDS=10000 is the right ceiling.** Early stopping now fires naturally at
   4269–7715 rounds (mean ~6672). The model converges fully.
+- **Single-model LightGBM is near its ceiling.** Raw CV was essentially flat across
+  attempts 4 and 5 (0.72516 vs 0.72528) despite very different configurations
+  (class weights added, OOF features added, N_ROUNDS doubled). The tuned gains came
+  from post-hoc correction, not from the model learning more. Strategic decision
+  after attempt-5: move to XGBoost ensemble before revisiting LightGBM internals.
 - **zip.code is the dominant feature** by gain (1.76M vs 872k for sales.channel).
   OOF encoding of zip cancel rates adds meaningful signal on top of the categorical.
 - **Numeric interaction features** (tenure×credit, premium/credit) add marginal gain
@@ -69,14 +72,17 @@ attempt-1: PASS  baseline — LightGBM on 300k subsample (0.72570)
 - **email_domain, house.color, original_quote_weekday, season_of_renewal** have
   near-zero class spread — likely pure noise features.
 
-## Open ideas (untried)
+## Open ideas (priority order)
 
-- Reduce class-2 weight from 1.5 → 1.1 so raw probabilities are better calibrated
-  before 2D threshold tuning (highest expected gain for attempt-6)
-- XGBoost ensemble averaging — different model bias, competition leaders likely ensembling
-- Real Optuna tuning that matches train_model.py's full feature pipeline
-  (tune_params.py exists but uses different features than the main pipeline)
-- Feature pruning: drop email_domain, house.color, original_quote_weekday,
-  season_of_renewal (near-zero signal)
-- New features: claim_per_year, email × credit interaction, is_first_year
-- Ordinal regression: two binary classifiers P(cancel≥1) and P(cancel≥2)
+1. **XGBoost ensemble** — train XGBoost on the same 5 folds with the same features,
+   average OOF probabilities with LightGBM, apply 2D threshold tuning on the blend.
+   Different model bias typically adds 0.2–0.5pt of new signal. Do this before any
+   further LightGBM tweaks.
+2. **Class-weight refinement** — reduce class-2 weight from 1.5 → 1.1 once ensemble
+   is established; the c2×0.65 multiplier signals overcalibration.
+3. **Optuna hyperparameter tuning** — run tune_params.py updated to match the full
+   feature pipeline (current version uses different features).
+4. **Feature pruning** — drop email_domain, house.color, original_quote_weekday,
+   season_of_renewal (near-zero signal spread across values).
+5. New features: claim_per_year, email × credit interaction, is_first_year
+6. Ordinal regression: two binary classifiers P(cancel≥1) and P(cancel≥2)
