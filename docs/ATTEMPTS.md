@@ -2,6 +2,50 @@
 
 ---
 
+## attempt-5: N_ROUNDS→10000 + 2D post-hoc multiplier tuning — PASS
+
+Branch: improve/attempt-5
+Date: 2026-05-09
+Runtime: 5927s
+CV accuracy: 0.72528 (raw) → 0.72927 (tuned)
+Std across folds: 0.00033
+Naive baseline: 0.70900
+Hypothesis: Class weights produced well-calibrated probabilities but overcorrected
+the argmax decision rule — class-0 recall dropped from 94% to 87.5%, costing more
+accuracy than was recovered from classes 1+2. A 2D grid search over class-1 and
+class-2 probability multipliers on OOF predictions would find the optimal decision
+boundary for accuracy without retraining. Raising N_ROUNDS to 10000 would let the
+model converge fully (4/5 folds hit the 5000 cap last attempt).
+Changes vs prior attempt:
+  - Post-hoc 2D multiplier grid search (t1, t2 in [0.40, 2.00] step 0.05)
+  - Apply best multipliers to test predictions before argmax
+  - N_ROUNDS 5000 → 10000 (EARLY_STOPPING=100 unchanged)
+  - Class weights {0:1, 1:2, 2:1.5} kept
+
+Result:
+  Tuned accuracy 0.72927 is a new best, +0.00277 over attempt-3 (0.72650).
+  The optimal multipliers were c2×0.65 (downscale class-2 by 35%) and c1×0.95
+  (nearly unchanged). This confirms the class-2 weight of 1.5 overcalibrated —
+  the model was predicting too much class-2, and pulling it back 35% recovered
+  class-0 recall from 87.5% to 92.4%. Early stopping now triggers naturally at
+  4269–7715 rounds (mean ~6672), confirming N_ROUNDS=10000 is the right ceiling.
+  Class-2 recall dropped from 35.8% to 22.9% due to the c2×0.65 downscaling —
+  the threshold tuning sacrificed class-2 recall for the accuracy metric.
+
+Confusion matrix:
+true \ pred    0          1          2
+0              684837     20699      35453
+1              49908      24904      555
+2              164670     11662      52435
+Per-class recall: class-0: 92.4%,  class-1: 33.0%,  class-2: 22.9%
+Verdict: PASS — 0.72927 (tuned) vs prior best 0.72650 (attempt-3), delta = +0.00277
+Next attempt should try: The c2×0.65 multiplier reveals the class-2 weight (1.5) is
+~35% too aggressive. Reduce class-2 weight from 1.5 toward 1.1–1.2 so the raw
+probabilities are better calibrated before tuning. The combined effect should let
+tuning find a multiplier closer to 1.0 and improve both raw and tuned accuracy.
+
+---
+
 ## attempt-4: class weights + zip_cancel1_rate OOF, dropped threshold tuning — FAIL
 
 Branch: improve/attempt-4

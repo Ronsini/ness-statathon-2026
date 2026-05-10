@@ -33,3 +33,43 @@ true_0  648136   22821   70032
 true_1   42407   27834    5126
 true_2  134331   12522   81914
 
+========================================================================
+Attempt : improve/attempt-5
+Date    : 2026-05-09 23:26
+Runtime : 5927s
+Changes vs attempt-4:
+  - Post-hoc threshold tuning on OOF predictions (grid search class-1 and
+    class-2 probability multipliers in [0.40, 2.00] step 0.05)
+  - Apply tuned multipliers to test predictions before argmax
+  - Raised N_ROUNDS from 5000 to 10000 (4/5 folds hit the cap last attempt)
+  - Kept class weights {0:1, 1:2, 2:1.5} unchanged — they produce well-
+    calibrated probabilities; the issue is only the argmax decision rule.
+
+Why it should help:
+  - Confusion matrix from attempt-4: class-0 recall dropped 94% → 87% from
+    weights, costing ~4.7 accuracy points (71% of data) while only recovering
+    ~4.6 from classes 1+2. Net loss from pure-accuracy perspective.
+  - Threshold tuning lets us keep well-calibrated probabilities (good for
+    interpretability and for the business problem) while correcting the
+    decision rule for accuracy. Expected: optimal class-1 multiplier ~0.5-0.7
+    (downweight class-1 predictions to recover class-0 wins), class-2
+    multiplier ~0.7-1.0.
+  - Previous threshold tuning was dropped after attempt-3; that version may
+    have searched a different range or used different weights. Revisiting
+    with attempt-4's weighting and a wider grid.
+------------------------------------------------------------------------
+============================================================
+5-fold CV accuracy (mean): 0.72528
+5-fold CV accuracy (std):  0.00033
+OOF accuracy (raw argmax): 0.72528
+OOF accuracy (tuned):      0.72927
+Multipliers: c0×1.00  c1×0.95  c2×0.65
+Naive baseline (all 0):    0.70900
+============================================================
+
+Confusion matrix (rows=true, cols=pred):
+        pred_0  pred_1  pred_2
+true_0  684837   20699   35453
+true_1   49908   24904     555
+true_2  164670   11662   52435
+
