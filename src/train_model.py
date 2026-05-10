@@ -36,20 +36,30 @@ N_ROUNDS = 5000
 EARLY_STOPPING = 100
 
 # Update this every branch so results_log.txt stays self-documenting
-ATTEMPT_LABEL = "improve/attempt-3"
+ATTEMPT_LABEL = "improve/attempt-4"
 ATTEMPT_NOTES = """
-Changes vs attempt-2:
-  - 4 new features: tenure_x_credit, res_tenure_ratio, premium_credit_stress,
-    premium_vs_dwelling (42 features total, up from 38)
-  - Class-2 threshold tuning via OOF grid search (t2 in 0.10-0.60)
+Changes vs attempt-3:
+  - Class weights: {0: 1.0, 1: 2.0, 2: 1.5} via sample_weight in lgb.Dataset
+  - New OOF feature: zip_cancel1_rate (smoothed class-1 rate per zip per fold)
+  - Dropped threshold tuning — 3 attempts confirmed it doesn't help accuracy
 
 Why it should help:
-  - Class 2 recall was stuck at 26% across all prior runs. The new features
-    target the two strongest cancel signals: financial pressure (high premium
-    relative to credit quality) and mobility (frequent moves relative to tenure).
-  - Threshold tuning recovers misclassified class-2 rows without retraining —
-    the model underestimates P(cancel=2), so we lower when we call it class 2.
+  - Class-2 recall is stuck at 22-26% not because of decision boundary placement
+    (threshold tuning failed) but because the model's probability estimates for
+    class 2 are too low. Upweighting class-2 rows during training makes the model
+    pay more attention to those examples and should shift P(cancel=2) upward.
+  - zip_cancel1_rate adds genuinely new signal: class-1 (may-cancel) rate per zip
+    code. Class-1 is the hardest class (only 7% of rows) and isn't captured by
+    the existing zip_cancel2_rate. The two OOF features together give the model
+    the full cancel risk profile per zip.
+  - Dropping threshold tuning simplifies the pipeline and removes a search that
+    was selecting t2=0.49 (more conservative, not less) — evidence the model
+    probabilities are already well-calibrated for accuracy.
 """
+
+# Per-class sample weights — upweight minority classes so the model
+# pays proportionally more attention to class-1 (7%) and class-2 (22%).
+CLASS_WEIGHTS = {0: 1.0, 1: 2.0, 2: 1.5}
 
 LGB_PARAMS = {
     "objective": "multiclass",
@@ -213,37 +223,52 @@ def main():
 
     # Placeholder columns for OOF zip target encoding (filled per fold)
     X["zip_cancel2_rate"] = np.nan
+    X["zip_cancel1_rate"] = np.nan
     X_test["zip_cancel2_rate"] = np.nan
-    zip_test_accum = np.zeros(len(X_test))  # average across folds for test
+    X_test["zip_cancel1_rate"] = np.nan
+    zip2_test_accum = np.zeros(len(X_test))
+    zip1_test_accum = np.zeros(len(X_test))
+
+    smooth_k = 20
 
     for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y)):
         log(f"Fold {fold + 1}/{N_FOLDS}...", t0)
         y_tr, y_va = y[tr_idx], y[va_idx]
 
-        # OOF target encoding: smoothed fraction of cancel==2 per zip,
-        # computed from training fold only to avoid leakage on val/test.
-        # At ~2600 rows per zip in the training fold, the self-inclusion
-        # leakage for training rows is ~0.04% — negligible.
-        global_rate = (y_tr == 2).mean()
+        # OOF target encoding: smoothed cancel-2 and cancel-1 rates per zip.
+        # Computed from training fold only to avoid leakage on val/test.
+        global_rate2 = (y_tr == 2).mean()
+        global_rate1 = (y_tr == 1).mean()
+
         # Cast to str to avoid Categorical dtype interfering with map/fillna
         tr_zips = X.iloc[tr_idx]["zip.code"].astype(str)
-        zip_rates = (
-            pd.DataFrame({"zip": tr_zips.values, "is2": (y_tr == 2).astype(float)})
-            .groupby("zip")["is2"]
-            .agg(["sum", "count"])
-        )
-        smooth_k = 20
-        zip_rates["rate"] = (zip_rates["sum"] + smooth_k * global_rate) / (zip_rates["count"] + smooth_k)
-        zip_map = zip_rates["rate"].to_dict()
+        zip_df = pd.DataFrame({
+            "zip": tr_zips.values,
+            "is2": (y_tr == 2).astype(float),
+            "is1": (y_tr == 1).astype(float),
+        })
+        zip_agg = zip_df.groupby("zip")[["is2", "is1"]].agg(["sum", "count"])
+        zip_agg.columns = ["sum2", "count2", "sum1", "count1"]
+        zip_agg["rate2"] = (zip_agg["sum2"] + smooth_k * global_rate2) / (zip_agg["count2"] + smooth_k)
+        zip_agg["rate1"] = (zip_agg["sum1"] + smooth_k * global_rate1) / (zip_agg["count1"] + smooth_k)
+        zip_map2 = zip_agg["rate2"].to_dict()
+        zip_map1 = zip_agg["rate1"].to_dict()
 
-        X.loc[tr_idx, "zip_cancel2_rate"] = X.iloc[tr_idx]["zip.code"].astype(str).map(zip_map).fillna(global_rate).values
-        X.loc[va_idx, "zip_cancel2_rate"] = X.iloc[va_idx]["zip.code"].astype(str).map(zip_map).fillna(global_rate).values
-        zip_test_accum += X_test["zip.code"].astype(str).map(zip_map).fillna(global_rate).values
-        X_test["zip_cancel2_rate"] = zip_test_accum / (fold + 1)
+        for col, zmap, grate, accum, test_col in [
+            ("zip_cancel2_rate", zip_map2, global_rate2, zip2_test_accum, "zip_cancel2_rate"),
+            ("zip_cancel1_rate", zip_map1, global_rate1, zip1_test_accum, "zip_cancel1_rate"),
+        ]:
+            X.loc[tr_idx, col] = X.iloc[tr_idx]["zip.code"].astype(str).map(zmap).fillna(grate).values
+            X.loc[va_idx, col] = X.iloc[va_idx]["zip.code"].astype(str).map(zmap).fillna(grate).values
+            accum += X_test["zip.code"].astype(str).map(zmap).fillna(grate).values
+            X_test[test_col] = accum / (fold + 1)
 
         X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
 
-        dtr = lgb.Dataset(X_tr, y_tr, categorical_feature=cat_cols)
+        # Sample weights — upweight minority classes during training
+        sample_weights_tr = np.array([CLASS_WEIGHTS[yi] for yi in y_tr])
+
+        dtr = lgb.Dataset(X_tr, y_tr, weight=sample_weights_tr, categorical_feature=cat_cols)
         dva = lgb.Dataset(X_va, y_va, categorical_feature=cat_cols, reference=dtr)
 
         model = lgb.train(
@@ -262,21 +287,8 @@ def main():
         fold_scores.append(fold_acc)
         log(f"  Fold {fold + 1} accuracy: {fold_acc:.5f}  (best iter: {model.best_iteration})", t0)
 
-    # Threshold tuning for class 2 — grid search on OOF predictions.
-    # The model systematically underestimates P(cancel=2), so lowering
-    # the decision threshold for class 2 can recover misclassified rows.
-    best_t2, best_acc_t2 = 0.333, 0.0
-    for t2 in np.arange(0.10, 0.61, 0.01):
-        pred_t = np.where(oof_preds[:, 2] >= t2, 2, oof_preds[:, :2].argmax(axis=1))
-        acc_t = accuracy_score(y, pred_t)
-        if acc_t > best_acc_t2:
-            best_acc_t2 = acc_t
-            best_t2 = t2
-    log(f"Best class-2 threshold: {best_t2:.2f}  OOF accuracy: {best_acc_t2:.5f}", t0)
-
-    # Apply tuned threshold to final predictions
-    oof_class = np.where(oof_preds[:, 2] >= best_t2, 2, oof_preds[:, :2].argmax(axis=1))
-    test_class = np.where(test_preds[:, 2] >= best_t2, 2, test_preds[:, :2].argmax(axis=1))
+    oof_class = oof_preds.argmax(axis=1)
+    test_class = test_preds.argmax(axis=1)
 
     overall_acc = accuracy_score(y, oof_class)
     cm = confusion_matrix(y, oof_class)
