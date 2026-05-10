@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
+import xgboost as xgb
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import StratifiedKFold
 
@@ -37,28 +38,24 @@ N_ROUNDS = 10000
 EARLY_STOPPING = 100
 
 # Update this every branch so results_log.txt stays self-documenting
-ATTEMPT_LABEL = "improve/attempt-5"
+ATTEMPT_LABEL = "improve/attempt-6"
 ATTEMPT_NOTES = """
-Changes vs attempt-4:
-  - Post-hoc threshold tuning on OOF predictions (grid search class-1 and
-    class-2 probability multipliers in [0.40, 2.00] step 0.05)
-  - Apply tuned multipliers to test predictions before argmax
-  - Raised N_ROUNDS from 5000 to 10000 (4/5 folds hit the cap last attempt)
-  - Kept class weights {0:1, 1:2, 2:1.5} unchanged — they produce well-
-    calibrated probabilities; the issue is only the argmax decision rule.
+Changes vs attempt-5:
+  - Added XGBoost as second base model trained on same 5 folds
+  - Same sample weights, same categorical features (XGBoost native cat support
+    via enable_categorical=True)
+  - Ensemble: 0.5 * LightGBM probs + 0.5 * XGBoost probs
+  - Threshold tuning applied to ensemble OOF (not per-model)
+  - LightGBM hyperparameters unchanged from attempt-5
 
 Why it should help:
-  - Confusion matrix from attempt-4: class-0 recall dropped 94% → 87% from
-    weights, costing ~4.7 accuracy points (71% of data) while only recovering
-    ~4.6 from classes 1+2. Net loss from pure-accuracy perspective.
-  - Threshold tuning lets us keep well-calibrated probabilities (good for
-    interpretability and for the business problem) while correcting the
-    decision rule for accuracy. Expected: optimal class-1 multiplier ~0.5-0.7
-    (downweight class-1 predictions to recover class-0 wins), class-2
-    multiplier ~0.7-1.0.
-  - Previous threshold tuning was dropped after attempt-3; that version may
-    have searched a different range or used different weights. Revisiting
-    with attempt-4's weighting and a wider grid.
+  - Raw CV has been essentially flat across attempts 4 and 5 (0.72516 vs
+    0.72528) despite very different LightGBM configurations. Single-model
+    LightGBM appears near its ceiling on this data.
+  - XGBoost uses a different splitting algorithm and slightly different feature
+    subsampling logic. When two strong models disagree on a row, the average
+    often beats either individually.
+  - Expected gain: +0.2 to +0.5pt over attempt-5's 0.72927 tuned accuracy.
 """
 
 # Per-class sample weights — upweight minority classes so the model
@@ -79,6 +76,23 @@ LGB_PARAMS = {
     "lambda_l2": 1.0,
     "verbose": -1,
     "n_jobs": -1,
+}
+
+XGB_PARAMS = {
+    "objective": "multi:softprob",
+    "num_class": 3,
+    "eval_metric": "mlogloss",
+    "learning_rate": 0.05,
+    "max_depth": 8,
+    "min_child_weight": 5,
+    "subsample": 0.85,
+    "colsample_bytree": 0.85,
+    "reg_lambda": 1.0,
+    "reg_alpha": 0.1,
+    "tree_method": "hist",
+    "enable_categorical": True,
+    "n_jobs": -1,
+    "verbosity": 1,
 }
 
 
@@ -221,9 +235,13 @@ def main():
 
     # 5-fold stratified CV
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
-    oof_preds = np.zeros((len(X), 3))
-    test_preds = np.zeros((len(X_test), 3))
-    fold_scores = []
+    lgb_oof_preds = np.zeros((len(X), 3))
+    xgb_oof_preds = np.zeros((len(X), 3))
+    lgb_test_preds = np.zeros((len(X_test), 3))
+    xgb_test_preds = np.zeros((len(X_test), 3))
+    fold_lgb_scores = []
+    fold_xgb_scores = []
+    fold_ens_scores = []
 
     # Placeholder columns for OOF zip target encoding (filled per fold)
     X["zip_cancel2_rate"] = np.nan
@@ -272,10 +290,11 @@ def main():
         # Sample weights — upweight minority classes during training
         sample_weights_tr = np.array([CLASS_WEIGHTS[yi] for yi in y_tr])
 
+        # --- LightGBM ---
         dtr = lgb.Dataset(X_tr, y_tr, weight=sample_weights_tr, categorical_feature=cat_cols)
         dva = lgb.Dataset(X_va, y_va, categorical_feature=cat_cols, reference=dtr)
 
-        model = lgb.train(
+        lgb_model = lgb.train(
             LGB_PARAMS,
             dtr,
             num_boost_round=N_ROUNDS,
@@ -283,21 +302,53 @@ def main():
             callbacks=[lgb.early_stopping(EARLY_STOPPING), lgb.log_evaluation(100)],
         )
 
-        va_pred = model.predict(X_va, num_iteration=model.best_iteration)
-        oof_preds[va_idx] = va_pred
-        test_preds += model.predict(X_test, num_iteration=model.best_iteration) / N_FOLDS
+        lgb_va_pred = lgb_model.predict(X_va, num_iteration=lgb_model.best_iteration)
+        lgb_oof_preds[va_idx] = lgb_va_pred
+        lgb_test_preds += lgb_model.predict(X_test, num_iteration=lgb_model.best_iteration) / N_FOLDS
 
-        fold_acc = accuracy_score(y_va, va_pred.argmax(axis=1))
-        fold_scores.append(fold_acc)
-        log(f"  Fold {fold + 1} accuracy: {fold_acc:.5f}  (best iter: {model.best_iteration})", t0)
+        # --- XGBoost ---
+        dtrain_xgb = xgb.DMatrix(X_tr, label=y_tr, weight=sample_weights_tr, enable_categorical=True)
+        dval_xgb = xgb.DMatrix(X_va, label=y_va, enable_categorical=True)
+        dtest_xgb = xgb.DMatrix(X_test, enable_categorical=True)
 
-    # Post-hoc threshold tuning — grid search class-1 and class-2 probability
-    # multipliers on OOF predictions to maximize accuracy without retraining.
-    raw_acc = accuracy_score(y, oof_preds.argmax(axis=1))
-    log(f"Raw OOF accuracy (argmax): {raw_acc:.5f}", t0)
+        xgb_model = xgb.train(
+            XGB_PARAMS,
+            dtrain_xgb,
+            num_boost_round=3000,
+            evals=[(dval_xgb, "valid")],
+            early_stopping_rounds=100,
+            verbose_eval=100,
+        )
 
-    print("\nTuning class-probability multipliers on OOF predictions...")
-    best_acc = raw_acc
+        xgb_va_pred = xgb_model.predict(dval_xgb).reshape(-1, 3)
+        xgb_oof_preds[va_idx] = xgb_va_pred
+        xgb_test_preds += xgb_model.predict(dtest_xgb).reshape(-1, 3) / N_FOLDS
+
+        lgb_fold_acc = accuracy_score(y_va, lgb_va_pred.argmax(axis=1))
+        xgb_fold_acc = accuracy_score(y_va, xgb_va_pred.argmax(axis=1))
+        ens_fold_acc = accuracy_score(y_va, (0.5 * lgb_va_pred + 0.5 * xgb_va_pred).argmax(axis=1))
+        fold_lgb_scores.append(lgb_fold_acc)
+        fold_xgb_scores.append(xgb_fold_acc)
+        fold_ens_scores.append(ens_fold_acc)
+        log(
+            f"  Fold {fold + 1}  LGB: {lgb_fold_acc:.5f}  "
+            f"XGB: {xgb_fold_acc:.5f}  ENS: {ens_fold_acc:.5f}  "
+            f"(lgb_iter: {lgb_model.best_iteration}, xgb_iter: {xgb_model.best_iteration})",
+            t0,
+        )
+
+    # Ensemble OOF and test predictions
+    ensemble_oof = 0.5 * lgb_oof_preds + 0.5 * xgb_oof_preds
+    ensemble_test = 0.5 * lgb_test_preds + 0.5 * xgb_test_preds
+
+    lgb_raw_acc = accuracy_score(y, lgb_oof_preds.argmax(axis=1))
+    xgb_raw_acc = accuracy_score(y, xgb_oof_preds.argmax(axis=1))
+    ens_raw_acc = accuracy_score(y, ensemble_oof.argmax(axis=1))
+    log(f"Raw OOF — LGB: {lgb_raw_acc:.5f}  XGB: {xgb_raw_acc:.5f}  ENS: {ens_raw_acc:.5f}", t0)
+
+    # Post-hoc threshold tuning on the ensemble OOF
+    print("\nTuning class-probability multipliers on ensemble OOF predictions...")
+    best_acc = ens_raw_acc
     best_mult = (1.0, 1.0, 1.0)
 
     for t1, t2 in product(
@@ -305,8 +356,7 @@ def main():
         np.arange(0.40, 2.01, 0.05),
     ):
         multipliers = np.array([1.0, t1, t2])
-        adjusted_oof = oof_preds * multipliers
-        pred = adjusted_oof.argmax(axis=1)
+        pred = (ensemble_oof * multipliers).argmax(axis=1)
         acc = accuracy_score(y, pred)
         if acc > best_acc:
             best_acc = acc
@@ -314,23 +364,26 @@ def main():
 
     print(f"Best multipliers: class0×{best_mult[0]:.2f}, "
           f"class1×{best_mult[1]:.2f}, class2×{best_mult[2]:.2f}")
-    print(f"Tuned OOF accuracy: {best_acc:.5f} (was {raw_acc:.5f})")
+    print(f"Tuned ensemble OOF accuracy: {best_acc:.5f} (was {ens_raw_acc:.5f})")
 
     multipliers_arr = np.array(best_mult)
-    oof_class = (oof_preds * multipliers_arr).argmax(axis=1)
-    test_class = (test_preds * multipliers_arr).argmax(axis=1)
+    oof_class = (ensemble_oof * multipliers_arr).argmax(axis=1)
+    test_class = (ensemble_test * multipliers_arr).argmax(axis=1)
 
     overall_acc = accuracy_score(y, oof_class)
     cm = confusion_matrix(y, oof_class)
 
     summary = []
     summary.append("=" * 60)
-    summary.append(f"5-fold CV accuracy (mean): {np.mean(fold_scores):.5f}")
-    summary.append(f"5-fold CV accuracy (std):  {np.std(fold_scores):.5f}")
-    summary.append(f"OOF accuracy (raw argmax): {raw_acc:.5f}")
-    summary.append(f"OOF accuracy (tuned):      {overall_acc:.5f}")
+    summary.append(f"5-fold LGB  (mean / std): {np.mean(fold_lgb_scores):.5f} / {np.std(fold_lgb_scores):.5f}")
+    summary.append(f"5-fold XGB  (mean / std): {np.mean(fold_xgb_scores):.5f} / {np.std(fold_xgb_scores):.5f}")
+    summary.append(f"5-fold ENS  (mean / std): {np.mean(fold_ens_scores):.5f} / {np.std(fold_ens_scores):.5f}")
+    summary.append(f"OOF LightGBM  (raw):      {lgb_raw_acc:.5f}")
+    summary.append(f"OOF XGBoost   (raw):      {xgb_raw_acc:.5f}")
+    summary.append(f"OOF Ensemble  (raw):      {ens_raw_acc:.5f}")
+    summary.append(f"OOF Ensemble  (tuned):    {overall_acc:.5f}")
     summary.append(f"Multipliers: c0×{best_mult[0]:.2f}  c1×{best_mult[1]:.2f}  c2×{best_mult[2]:.2f}")
-    summary.append(f"Naive baseline (all 0):    {(y == 0).mean():.5f}")
+    summary.append(f"Naive baseline (all 0):   {(y == 0).mean():.5f}")
     summary.append("=" * 60)
     summary.append("\nConfusion matrix (rows=true, cols=pred):")
     summary.append(

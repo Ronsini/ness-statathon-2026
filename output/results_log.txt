@@ -33,3 +33,42 @@ true_0  648136   22821   70032
 true_1   42407   27834    5126
 true_2  134331   12522   81914
 
+========================================================================
+Attempt : improve/attempt-6
+Date    : 2026-05-10 15:37
+Runtime : 6263s
+Changes vs attempt-5:
+  - Added XGBoost as second base model trained on same 5 folds
+  - Same sample weights, same categorical features (XGBoost native cat support
+    via enable_categorical=True)
+  - Ensemble: 0.5 * LightGBM probs + 0.5 * XGBoost probs
+  - Threshold tuning applied to ensemble OOF (not per-model)
+  - LightGBM hyperparameters unchanged from attempt-5
+
+Why it should help:
+  - Raw CV has been essentially flat across attempts 4 and 5 (0.72516 vs
+    0.72528) despite very different LightGBM configurations. Single-model
+    LightGBM appears near its ceiling on this data.
+  - XGBoost uses a different splitting algorithm and slightly different feature
+    subsampling logic. When two strong models disagree on a row, the average
+    often beats either individually.
+  - Expected gain: +0.2 to +0.5pt over attempt-5's 0.72927 tuned accuracy.
+------------------------------------------------------------------------
+============================================================
+5-fold LGB  (mean / std): 0.72528 / 0.00033
+5-fold XGB  (mean / std): 0.71909 / 0.00040
+5-fold ENS  (mean / std): 0.72318 / 0.00038
+OOF LightGBM  (raw):      0.72528
+OOF XGBoost   (raw):      0.71909
+OOF Ensemble  (raw):      0.72318
+OOF Ensemble  (tuned):    0.72711
+Multipliers: c0×1.00  c1×1.00  c2×0.70
+Naive baseline (all 0):   0.70900
+============================================================
+
+Confusion matrix (rows=true, cols=pred):
+        pred_0  pred_1  pred_2
+true_0  675566   25030   40393
+true_1   47423   27090     854
+true_2  157293   14214   57260
+

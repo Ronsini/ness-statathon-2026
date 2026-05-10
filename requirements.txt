@@ -5,3 +5,4 @@ lightgbm>=4.0
 matplotlib>=3.7
 seaborn>=0.12
 optuna>=3.0
+xgboost>=2.0

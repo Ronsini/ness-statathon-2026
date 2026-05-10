@@ -2,6 +2,91 @@
 
 ---
 
+## attempt-6: XGBoost ensemble (50/50 blend) + threshold tuning — FAIL
+
+Branch: improve/attempt-6
+Date: 2026-05-10
+Runtime: 6263s
+CV accuracy: 0.72318 (ensemble raw) → 0.72711 (tuned)
+  LightGBM alone: 0.72528 raw
+  XGBoost alone:  0.71909 raw
+Std across folds: ENS 0.00038, LGB 0.00033, XGB 0.00040
+Naive baseline: 0.70900
+Hypothesis: Single-model LightGBM is near its ceiling (raw CV flat at 0.725 across
+attempts 4 and 5 despite major configuration changes). XGBoost with the same folds,
+features, and class weights would add diversity via a different splitting algorithm.
+A 50/50 probability average followed by 2D threshold tuning on the ensemble OOF
+was expected to yield +0.2 to +0.5pt over attempt-5's 0.72927 tuned.
+Changes vs prior attempt:
+  - Added XGBoost (multi:softprob, lr=0.05, max_depth=8, ~1300 rounds)
+  - Ensemble: 0.5 × LightGBM + 0.5 × XGBoost probabilities
+  - Threshold tuning applied to ensemble OOF
+  - LightGBM hyperparameters unchanged
+
+Result:
+  The 50/50 blend hurt — XGBoost (0.71909) is 0.0062 weaker than LightGBM (0.72528)
+  individually, and averaging in the weaker model dragged the ensemble raw to 0.72318,
+  below LightGBM alone. Tuning recovered to 0.72711 but still 0.00216 below attempt-5.
+  XGBoost converged quickly (~1200–1400 rounds) but plateaued at mlogloss ~0.631 vs
+  LightGBM's ~0.615 — a 0.016 logloss gap. Root cause: XGBoost's categorical handling
+  for high-cardinality features (zip.code, 400+ values) is inferior to LightGBM's
+  native categorical splits. The `enable_categorical` warning ("parameter not used")
+  was harmless — it was correctly set on DMatrix — but XGBoost still handled zip.code
+  less effectively, which matters since zip.code is the #1 feature by gain.
+
+Confusion matrix:
+true \ pred    0          1          2
+0              675566     25030      40393
+1              47423      27090      854
+2              157293     14214      57260
+Per-class recall: class-0: 91.2%,  class-1: 35.9%,  class-2: 25.0%
+Verdict: FAIL — 0.72711 vs prior best 0.72927 (attempt-5), delta = -0.00216
+Next attempt should try: Pre-encode high-cardinality categoricals (zip.code,
+sales.channel) as numeric OOF rates before passing to XGBoost, so it can compete
+with LightGBM's native categorical handling. Alternatively: try a weighted blend
+(0.75 LGB + 0.25 XGB) to limit XGBoost's drag, or drop XGBoost for now and run
+Optuna hyperparameter tuning on LightGBM.
+
+---
+
+## attempt-5: N_ROUNDS→10000 + 2D post-hoc multiplier tuning — PASS
+
+Branch: improve/attempt-5
+Date: 2026-05-09
+Runtime: 5927s
+CV accuracy: 0.72528 (raw) → 0.72927 (tuned)
+Std across folds: 0.00033
+Naive baseline: 0.70900
+Hypothesis: Class weights produced well-calibrated probabilities but overcorrected
+the argmax decision rule — class-0 recall dropped from 94% to 87.5%, costing more
+accuracy than was recovered from classes 1+2. A 2D grid search over class-1 and
+class-2 probability multipliers on OOF predictions would find the optimal decision
+boundary for accuracy without retraining. Raising N_ROUNDS to 10000 would let the
+model converge fully (4/5 folds hit the 5000 cap last attempt).
+Changes vs prior attempt:
+  - Post-hoc 2D multiplier grid search (t1, t2 in [0.40, 2.00] step 0.05)
+  - Apply best multipliers to test predictions before argmax
+  - N_ROUNDS 5000 → 10000 (EARLY_STOPPING=100 unchanged)
+  - Class weights {0:1, 1:2, 2:1.5} kept
+
+Result:
+  Tuned accuracy 0.72927 is a new best, +0.00277 over attempt-3 (0.72650).
+  Optimal multipliers: c2×0.65 (downscale class-2 by 35%), c1×0.95 (near unchanged).
+  Class-0 recall recovered from 87.5% to 92.4%. Early stopping now triggers naturally
+  at 4269–7715 rounds (mean ~6672), confirming N_ROUNDS=10000 is correct.
+
+Confusion matrix:
+true \ pred    0          1          2
+0              684837     20699      35453
+1              49908      24904      555
+2              164670     11662      52435
+Per-class recall: class-0: 92.4%,  class-1: 33.0%,  class-2: 22.9%
+Verdict: PASS — 0.72927 (tuned) vs prior best 0.72650 (attempt-3), delta = +0.00277
+Next attempt should try: XGBoost ensemble — LightGBM raw CV flat across attempts 4
+and 5 despite major config changes; diversity from a second model needed.
+
+---
+
 ## attempt-4: class weights + zip_cancel1_rate OOF, dropped threshold tuning — FAIL
 
 Branch: improve/attempt-4
