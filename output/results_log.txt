@@ -1,0 +1,35 @@
+========================================================================
+Attempt : improve/attempt-4
+Date    : 2026-05-09 21:35
+Runtime : 3542s
+Changes vs attempt-3:
+  - Class weights: {0: 1.0, 1: 2.0, 2: 1.5} via sample_weight in lgb.Dataset
+  - New OOF feature: zip_cancel1_rate (smoothed class-1 rate per zip per fold)
+  - Dropped threshold tuning — 3 attempts confirmed it doesn't help accuracy
+
+Why it should help:
+  - Class-2 recall is stuck at 22-26% not because of decision boundary placement
+    (threshold tuning failed) but because the model's probability estimates for
+    class 2 are too low. Upweighting class-2 rows during training makes the model
+    pay more attention to those examples and should shift P(cancel=2) upward.
+  - zip_cancel1_rate adds genuinely new signal: class-1 (may-cancel) rate per zip
+    code. Class-1 is the hardest class (only 7% of rows) and isn't captured by
+    the existing zip_cancel2_rate. The two OOF features together give the model
+    the full cancel risk profile per zip.
+  - Dropping threshold tuning simplifies the pipeline and removes a search that
+    was selecting t2=0.49 (more conservative, not less) — evidence the model
+    probabilities are already well-calibrated for accuracy.
+------------------------------------------------------------------------
+============================================================
+5-fold CV accuracy (mean): 0.72516
+5-fold CV accuracy (std):  0.00033
+OOF accuracy overall:      0.72516
+Naive baseline (all 0):    0.70900
+============================================================
+
+Confusion matrix (rows=true, cols=pred):
+        pred_0  pred_1  pred_2
+true_0  648136   22821   70032
+true_1   42407   27834    5126
+true_2  134331   12522   81914
+
