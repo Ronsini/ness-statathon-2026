@@ -11,6 +11,7 @@ Usage:
 """
 
 import time
+from itertools import product
 from pathlib import Path
 
 import numpy as np
@@ -32,29 +33,32 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 SAMPLE_N = None  # None = full 1M rows; set an int to subsample for quick iteration
 N_FOLDS = 5
 RANDOM_STATE = 42
-N_ROUNDS = 5000
+N_ROUNDS = 10000
 EARLY_STOPPING = 100
 
 # Update this every branch so results_log.txt stays self-documenting
-ATTEMPT_LABEL = "improve/attempt-4"
+ATTEMPT_LABEL = "improve/attempt-5"
 ATTEMPT_NOTES = """
-Changes vs attempt-3:
-  - Class weights: {0: 1.0, 1: 2.0, 2: 1.5} via sample_weight in lgb.Dataset
-  - New OOF feature: zip_cancel1_rate (smoothed class-1 rate per zip per fold)
-  - Dropped threshold tuning — 3 attempts confirmed it doesn't help accuracy
+Changes vs attempt-4:
+  - Post-hoc threshold tuning on OOF predictions (grid search class-1 and
+    class-2 probability multipliers in [0.40, 2.00] step 0.05)
+  - Apply tuned multipliers to test predictions before argmax
+  - Raised N_ROUNDS from 5000 to 10000 (4/5 folds hit the cap last attempt)
+  - Kept class weights {0:1, 1:2, 2:1.5} unchanged — they produce well-
+    calibrated probabilities; the issue is only the argmax decision rule.
 
 Why it should help:
-  - Class-2 recall is stuck at 22-26% not because of decision boundary placement
-    (threshold tuning failed) but because the model's probability estimates for
-    class 2 are too low. Upweighting class-2 rows during training makes the model
-    pay more attention to those examples and should shift P(cancel=2) upward.
-  - zip_cancel1_rate adds genuinely new signal: class-1 (may-cancel) rate per zip
-    code. Class-1 is the hardest class (only 7% of rows) and isn't captured by
-    the existing zip_cancel2_rate. The two OOF features together give the model
-    the full cancel risk profile per zip.
-  - Dropping threshold tuning simplifies the pipeline and removes a search that
-    was selecting t2=0.49 (more conservative, not less) — evidence the model
-    probabilities are already well-calibrated for accuracy.
+  - Confusion matrix from attempt-4: class-0 recall dropped 94% → 87% from
+    weights, costing ~4.7 accuracy points (71% of data) while only recovering
+    ~4.6 from classes 1+2. Net loss from pure-accuracy perspective.
+  - Threshold tuning lets us keep well-calibrated probabilities (good for
+    interpretability and for the business problem) while correcting the
+    decision rule for accuracy. Expected: optimal class-1 multiplier ~0.5-0.7
+    (downweight class-1 predictions to recover class-0 wins), class-2
+    multiplier ~0.7-1.0.
+  - Previous threshold tuning was dropped after attempt-3; that version may
+    have searched a different range or used different weights. Revisiting
+    with attempt-4's weighting and a wider grid.
 """
 
 # Per-class sample weights — upweight minority classes so the model
@@ -287,8 +291,34 @@ def main():
         fold_scores.append(fold_acc)
         log(f"  Fold {fold + 1} accuracy: {fold_acc:.5f}  (best iter: {model.best_iteration})", t0)
 
-    oof_class = oof_preds.argmax(axis=1)
-    test_class = test_preds.argmax(axis=1)
+    # Post-hoc threshold tuning — grid search class-1 and class-2 probability
+    # multipliers on OOF predictions to maximize accuracy without retraining.
+    raw_acc = accuracy_score(y, oof_preds.argmax(axis=1))
+    log(f"Raw OOF accuracy (argmax): {raw_acc:.5f}", t0)
+
+    print("\nTuning class-probability multipliers on OOF predictions...")
+    best_acc = raw_acc
+    best_mult = (1.0, 1.0, 1.0)
+
+    for t1, t2 in product(
+        np.arange(0.40, 2.01, 0.05),
+        np.arange(0.40, 2.01, 0.05),
+    ):
+        multipliers = np.array([1.0, t1, t2])
+        adjusted_oof = oof_preds * multipliers
+        pred = adjusted_oof.argmax(axis=1)
+        acc = accuracy_score(y, pred)
+        if acc > best_acc:
+            best_acc = acc
+            best_mult = (1.0, t1, t2)
+
+    print(f"Best multipliers: class0×{best_mult[0]:.2f}, "
+          f"class1×{best_mult[1]:.2f}, class2×{best_mult[2]:.2f}")
+    print(f"Tuned OOF accuracy: {best_acc:.5f} (was {raw_acc:.5f})")
+
+    multipliers_arr = np.array(best_mult)
+    oof_class = (oof_preds * multipliers_arr).argmax(axis=1)
+    test_class = (test_preds * multipliers_arr).argmax(axis=1)
 
     overall_acc = accuracy_score(y, oof_class)
     cm = confusion_matrix(y, oof_class)
@@ -297,7 +327,9 @@ def main():
     summary.append("=" * 60)
     summary.append(f"5-fold CV accuracy (mean): {np.mean(fold_scores):.5f}")
     summary.append(f"5-fold CV accuracy (std):  {np.std(fold_scores):.5f}")
-    summary.append(f"OOF accuracy overall:      {overall_acc:.5f}")
+    summary.append(f"OOF accuracy (raw argmax): {raw_acc:.5f}")
+    summary.append(f"OOF accuracy (tuned):      {overall_acc:.5f}")
+    summary.append(f"Multipliers: c0×{best_mult[0]:.2f}  c1×{best_mult[1]:.2f}  c2×{best_mult[2]:.2f}")
     summary.append(f"Naive baseline (all 0):    {(y == 0).mean():.5f}")
     summary.append("=" * 60)
     summary.append("\nConfusion matrix (rows=true, cols=pred):")
