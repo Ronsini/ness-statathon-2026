@@ -264,6 +264,8 @@ def objective(
         "objective": "multiclass",
         "num_class": 3,
         "metric": "multi_logloss",
+        "feature_pre_filter": False,
+        "zero_as_missing": False,
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.05, log=True),
         "num_leaves": trial.suggest_int("num_leaves", 63, 511),
         "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 20, 300),
@@ -277,6 +279,11 @@ def objective(
         "verbose": -1,
         "n_jobs": -1,
     }
+
+    # Fresh copy per trial so stale OOF values never carry over between trials
+    X = X.copy()
+    for col in OOF_COLS:
+        X[col] = np.nan
 
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
     oof_preds = np.zeros((len(X), 3))
