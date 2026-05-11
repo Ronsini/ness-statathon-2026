@@ -50,6 +50,7 @@ Decision rule: two-stage multiplier search (coarse step 0.05, fine step 0.01 ±0
 
 ## What's been tried (newest first)
 
+attempt-9: FAIL (tuning) — Optuna 40-trial search on 350k subsample; params not used (c1 multiplier hit search floor)
 attempt-8: MIXED +0.00036 — lighter weights {0:1, 1:1.3, 2:1.1}, nested OOF encoding, 4 new OOF features
 attempt-7: MIXED +0.00018 — OOF age×credit encoding + 6 missingness flags (52 features)
 attempt-6: FAIL  -0.00216 — XGBoost ensemble blend (zip.code handling inferior)
@@ -84,9 +85,9 @@ attempt-1: PASS  baseline — LightGBM on 300k subsample (0.72570)
 
 ## Open ideas (untried)
 
-- Optuna hyperparameter search on LightGBM with the full 56-feature pipeline
-  (tune_params.py exists but uses a different feature set — needs to be rewritten
-  to match train_model.py's pipeline)
+- Optuna re-run with no class weights (attempt-9 Optuna ran with weights active;
+  optimal c1 multiplier hit the search floor at 0.30, suggesting extreme probability
+  miscalibration — weights-free tuning would avoid this)
 - is_first_year_with_claim: (tenure < 1.1) & (claim.ind == 1), 31% c2 rate vs 21.9%
   overall (+9.1pp). Small segment but cleanly separable.
 - zip_frequency: count of training rows per zip code. Rare zips have 40–50% c2 rate

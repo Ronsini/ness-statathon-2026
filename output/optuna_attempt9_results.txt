@@ -1,0 +1,37 @@
+============================================================
+Optuna attempt-9 tuning results
+Runtime:               13307s
+Sample size:           350,000 rows (3-fold, 40 trials)
+Best trial:            #11
+Best raw OOF accuracy: 0.72119
+Best tuned OOF accuracy: 0.72621
+Best multipliers:      c1x0.300  c2x0.840
+============================================================
+
+Top 5 trials by tuned OOF accuracy:
+  trial # 11: tuned=0.72621  raw=0.72119  c1x0.300  c2x0.840
+  trial # 14: tuned=0.72608  raw=0.72185  c1x0.300  c2x0.850
+  trial # 23: tuned=0.72608  raw=0.72181  c1x0.300  c2x0.850
+  trial # 19: tuned=0.72598  raw=0.72123  c1x0.300  c2x0.830
+  trial # 22: tuned=0.72592  raw=0.72122  c1x0.300  c2x0.830
+
+--- Paste into src/train_model.py LGB_PARAMS ---
+LGB_PARAMS = {
+    "objective": "multiclass",
+    "num_class": 3,
+    "metric": "multi_logloss",
+    "feature_pre_filter": False,
+    "zero_as_missing": False,
+    "learning_rate": 0.024968,
+    "num_leaves": 336,
+    "min_data_in_leaf": 287,
+    "feature_fraction": 0.665576,
+    "bagging_fraction": 0.843003,
+    "bagging_freq": 6,
+    "lambda_l1": 0.003721,
+    "lambda_l2": 0.307526,
+    "max_depth": 6,
+    "min_gain_to_split": 0.003584,
+    "verbose": -1,
+    "n_jobs": -1,
+}

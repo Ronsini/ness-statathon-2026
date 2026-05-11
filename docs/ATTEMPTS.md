@@ -2,6 +2,52 @@
 
 ---
 
+## attempt-9: Optuna hyperparameter search — FAIL (tuning run, not submitted)
+
+Branch: improve/attempt-9
+Date: 2026-05-11
+Runtime: 13307s (~3.7 hours)
+Type: Optuna tuning on 350k-row subsample (3-fold CV, 40 trials, N_ROUNDS=5000)
+Best trial: #11
+Best tuned OOF accuracy (subsample): 0.72621
+Best raw OOF accuracy (subsample): 0.72119
+Best multipliers (subsample): c1×0.300, c2×0.840
+Naive baseline: 0.70900
+Hypothesis: 40 Optuna trials using the full attempt-8 feature pipeline (56 features,
+  nested OOF encoding, CLASS_WEIGHTS={0:1.0, 1:1.3, 2:1.1}) would find hyperparameters
+  that outperform the hand-tuned attempt-8 params on the full 1M dataset.
+Search space: learning_rate [0.01-0.05], num_leaves [63-511],
+  min_data_in_leaf [20-300], feature_fraction [0.65-0.95],
+  bagging_fraction [0.65-0.95], bagging_freq [1-10], lambda_l1 [1e-4-2.0],
+  lambda_l2 [1e-3-20.0], max_depth {-1,6,8,10,12}, min_gain_to_split [0.0-1.0]
+
+Best params found:
+  learning_rate=0.025, num_leaves=336, min_data_in_leaf=287,
+  feature_fraction=0.666, bagging_fraction=0.843, bagging_freq=6,
+  lambda_l1=0.004, lambda_l2=0.308, max_depth=6, min_gain_to_split=0.004
+
+Result:
+  Tuning run considered failed — params not carried forward into train_model.py.
+  The best trial's c1×0.300 multiplier hit the fine-search floor (the coarse grid
+  starts at 0.40, fine grid bottom is 0.30), meaning the optimal c1 multiplier is
+  at or below the search boundary. This signals that the found hyperparameters
+  produce over-confident class-1 predictions that require extreme suppression to
+  maximize accuracy — a sign the params are not well-calibrated for this objective.
+  The subsample (350k) and reduced folds (3) may also have introduced enough
+  noise that the identified optimum doesn't transfer to the full 1M/5-fold setting.
+  All top-5 trials show the same c1×0.300 boundary pattern, confirming this is
+  systematic rather than a single-trial fluke.
+
+Confusion matrix: N/A (tuning run, no full-dataset predictions)
+Per-class recall: N/A
+Verdict: FAIL — tuning run results not used; attempt-8 params remain in effect
+Next attempt should try: Run a second Optuna pass with a different objective
+  (minimize class-1 calibration error, or use a coarse search with a lower c1
+  multiplier floor of 0.05) or try Optuna with no class weights so the multiplier
+  search is not fighting against extreme probability miscalibration.
+
+---
+
 ## attempt-8: lighter weights, nested OOF, 4 new OOF features — MIXED
 
 Branch: improve/attempt-8
