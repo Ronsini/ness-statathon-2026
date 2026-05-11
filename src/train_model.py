@@ -52,6 +52,9 @@ Changes vs attempt-7:
   - Two-stage multiplier search: coarse (step 0.05, full range) then fine
     (step 0.01, +-0.10 around coarse best) for higher-precision tuning.
   - Retained from attempt-7: 6 missingness flags + age_credit OOF features.
+  - Training-fold target encodings are now nested OOF encodings: each outer
+    training fold is split into inner folds so training rows are encoded with
+    rates computed from other inner-fold rows, not their own labels.
 """
 
 # Lighter weights: class-0 recall matters more than class-1/2 recall
@@ -219,6 +222,61 @@ def compute_oof_rates(
     return agg["rate2"].to_dict(), agg["rate1"].to_dict(), global_rate2, global_rate1
 
 
+def build_encoding_maps(
+    X_source: pd.DataFrame,
+    row_idx: np.ndarray,
+    y_source: np.ndarray,
+    age_credit_keys: pd.Series,
+    zip_sales_keys: pd.Series,
+    cov_dwell_keys: pd.Series,
+    smooth_k: int,
+) -> dict:
+    """Build all target-encoding maps using only the selected source rows."""
+    y_part = y_source[row_idx]
+    zip_maps = compute_oof_rates(
+        X_source.iloc[row_idx]["zip.code"].astype(str).reset_index(drop=True),
+        y_part, smooth_k,
+    )
+    ac_maps = compute_oof_rates(
+        age_credit_keys.iloc[row_idx].reset_index(drop=True),
+        y_part, smooth_k,
+    )
+    zs_maps = compute_oof_rates(
+        zip_sales_keys.iloc[row_idx].reset_index(drop=True),
+        y_part, smooth_k,
+    )
+    cd_maps = compute_oof_rates(
+        cov_dwell_keys.iloc[row_idx].reset_index(drop=True),
+        y_part, smooth_k,
+    )
+    return {"zip": zip_maps, "age_credit": ac_maps, "zip_sales": zs_maps, "cov_dwell": cd_maps}
+
+
+def fill_rate_columns(
+    X_target: pd.DataFrame,
+    row_idx: np.ndarray,
+    zip_keys: pd.Series,
+    age_credit_keys: pd.Series,
+    zip_sales_keys: pd.Series,
+    cov_dwell_keys: pd.Series,
+    maps: dict,
+) -> None:
+    """Fill target-encoding columns for selected rows using already-built maps."""
+    zip_map2, zip_map1, gz2, gz1 = maps["zip"]
+    ac_map2, ac_map1, ac_gz2, ac_gz1 = maps["age_credit"]
+    zs_map2, zs_map1, zs_gz2, zs_gz1 = maps["zip_sales"]
+    cd_map2, cd_map1, cd_gz2, cd_gz1 = maps["cov_dwell"]
+
+    X_target.loc[row_idx, "zip_cancel2_rate"] = zip_keys.iloc[row_idx].map(zip_map2).fillna(gz2).values
+    X_target.loc[row_idx, "zip_cancel1_rate"] = zip_keys.iloc[row_idx].map(zip_map1).fillna(gz1).values
+    X_target.loc[row_idx, "age_credit_cancel2_rate"] = age_credit_keys.iloc[row_idx].map(ac_map2).fillna(ac_gz2).values
+    X_target.loc[row_idx, "age_credit_cancel1_rate"] = age_credit_keys.iloc[row_idx].map(ac_map1).fillna(ac_gz1).values
+    X_target.loc[row_idx, "zip_sales_cancel2_rate"] = zip_sales_keys.iloc[row_idx].map(zs_map2).fillna(zs_gz2).values
+    X_target.loc[row_idx, "zip_sales_cancel1_rate"] = zip_sales_keys.iloc[row_idx].map(zs_map1).fillna(zs_gz1).values
+    X_target.loc[row_idx, "cov_dwell_cancel2_rate"] = cov_dwell_keys.iloc[row_idx].map(cd_map2).fillna(cd_gz2).values
+    X_target.loc[row_idx, "cov_dwell_cancel1_rate"] = cov_dwell_keys.iloc[row_idx].map(cd_map1).fillna(cd_gz1).values
+
+
 # -----------------------------------------------------------------------------
 # Main pipeline
 # -----------------------------------------------------------------------------
@@ -255,6 +313,8 @@ def main():
     zip_sales_keys_test = make_zip_sales_key(X_test)
     cov_dwell_keys_train = make_cov_dwell_key(X)
     cov_dwell_keys_test = make_cov_dwell_key(X_test)
+    zip_keys_train = X["zip.code"].astype(str).reset_index(drop=True)
+    zip_keys_test = X_test["zip.code"].astype(str).reset_index(drop=True)
 
     # Align categoricals
     cat_cols = X.select_dtypes(include=["object", "string"]).columns.tolist()
@@ -276,6 +336,16 @@ def main():
 
     # Guarantee positional RangeIndex so .loc[tr_idx/va_idx] is unambiguous
     X = X.reset_index(drop=True)
+    X_test = X_test.reset_index(drop=True)
+    y = np.asarray(y)
+    age_credit_keys_train = age_credit_keys_train.reset_index(drop=True)
+    age_credit_keys_test = age_credit_keys_test.reset_index(drop=True)
+    zip_sales_keys_train = zip_sales_keys_train.reset_index(drop=True)
+    zip_sales_keys_test = zip_sales_keys_test.reset_index(drop=True)
+    cov_dwell_keys_train = cov_dwell_keys_train.reset_index(drop=True)
+    cov_dwell_keys_test = cov_dwell_keys_test.reset_index(drop=True)
+    zip_keys_train = zip_keys_train.reset_index(drop=True)
+    zip_keys_test = zip_keys_test.reset_index(drop=True)
 
     # 5-fold stratified CV
     skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
@@ -289,45 +359,66 @@ def main():
         log(f"Fold {fold + 1}/{N_FOLDS}...", t0)
         y_tr, y_va = y[tr_idx], y[va_idx]
 
-        # Compute OOF maps from training fold only (avoid leakage onto val/test)
-        zip_map2, zip_map1, gz2, gz1 = compute_oof_rates(
-            pd.Series(X.iloc[tr_idx]["zip.code"].astype(str).values), y_tr, smooth_k
+        # Step 1: Fill training rows via nested OOF — each training row is encoded
+        # using rates from the other inner-fold rows, not its own label.
+        inner_skf = StratifiedKFold(
+            n_splits=N_FOLDS,
+            shuffle=True,
+            random_state=RANDOM_STATE + fold + 100,
         )
-        ac_map2, ac_map1, ac_gz2, ac_gz1 = compute_oof_rates(
-            pd.Series(age_credit_keys_train.iloc[tr_idx].values), y_tr, smooth_k
-        )
-        zs_map2, zs_map1, zs_gz2, zs_gz1 = compute_oof_rates(
-            pd.Series(zip_sales_keys_train.iloc[tr_idx].values), y_tr, smooth_k
-        )
-        cd_map2, cd_map1, cd_gz2, cd_gz1 = compute_oof_rates(
-            pd.Series(cov_dwell_keys_train.iloc[tr_idx].values), y_tr, smooth_k
+        for inner_tr_pos, inner_va_pos in inner_skf.split(X.iloc[tr_idx], y_tr):
+            inner_tr_idx = tr_idx[inner_tr_pos]
+            inner_va_idx = tr_idx[inner_va_pos]
+            inner_maps = build_encoding_maps(
+                X_source=X,
+                row_idx=inner_tr_idx,
+                y_source=y,
+                age_credit_keys=age_credit_keys_train,
+                zip_sales_keys=zip_sales_keys_train,
+                cov_dwell_keys=cov_dwell_keys_train,
+                smooth_k=smooth_k,
+            )
+            fill_rate_columns(
+                X_target=X,
+                row_idx=inner_va_idx,
+                zip_keys=zip_keys_train,
+                age_credit_keys=age_credit_keys_train,
+                zip_sales_keys=zip_sales_keys_train,
+                cov_dwell_keys=cov_dwell_keys_train,
+                maps=inner_maps,
+            )
+
+        # Step 2: Build outer maps from the full outer training fold
+        outer_maps = build_encoding_maps(
+            X_source=X,
+            row_idx=tr_idx,
+            y_source=y,
+            age_credit_keys=age_credit_keys_train,
+            zip_sales_keys=zip_sales_keys_train,
+            cov_dwell_keys=cov_dwell_keys_train,
+            smooth_k=smooth_k,
         )
 
-        # Fill OOF columns for training fold (mild in-fold leakage — standard practice)
-        X.loc[tr_idx, "zip_cancel2_rate"] = X.iloc[tr_idx]["zip.code"].astype(str).map(zip_map2).fillna(gz2).values
-        X.loc[tr_idx, "zip_cancel1_rate"] = X.iloc[tr_idx]["zip.code"].astype(str).map(zip_map1).fillna(gz1).values
-        X.loc[tr_idx, "age_credit_cancel2_rate"] = age_credit_keys_train.iloc[tr_idx].map(ac_map2).fillna(ac_gz2).values
-        X.loc[tr_idx, "age_credit_cancel1_rate"] = age_credit_keys_train.iloc[tr_idx].map(ac_map1).fillna(ac_gz1).values
-        X.loc[tr_idx, "zip_sales_cancel2_rate"] = zip_sales_keys_train.iloc[tr_idx].map(zs_map2).fillna(zs_gz2).values
-        X.loc[tr_idx, "zip_sales_cancel1_rate"] = zip_sales_keys_train.iloc[tr_idx].map(zs_map1).fillna(zs_gz1).values
-        X.loc[tr_idx, "cov_dwell_cancel2_rate"] = cov_dwell_keys_train.iloc[tr_idx].map(cd_map2).fillna(cd_gz2).values
-        X.loc[tr_idx, "cov_dwell_cancel1_rate"] = cov_dwell_keys_train.iloc[tr_idx].map(cd_map1).fillna(cd_gz1).values
+        # Step 3: Fill validation rows using outer maps only (no leakage)
+        fill_rate_columns(
+            X_target=X,
+            row_idx=va_idx,
+            zip_keys=zip_keys_train,
+            age_credit_keys=age_credit_keys_train,
+            zip_sales_keys=zip_sales_keys_train,
+            cov_dwell_keys=cov_dwell_keys_train,
+            maps=outer_maps,
+        )
 
-        # Fill OOF columns for validation fold (correct out-of-fold encoding — no leakage)
-        X.loc[va_idx, "zip_cancel2_rate"] = X.iloc[va_idx]["zip.code"].astype(str).map(zip_map2).fillna(gz2).values
-        X.loc[va_idx, "zip_cancel1_rate"] = X.iloc[va_idx]["zip.code"].astype(str).map(zip_map1).fillna(gz1).values
-        X.loc[va_idx, "age_credit_cancel2_rate"] = age_credit_keys_train.iloc[va_idx].map(ac_map2).fillna(ac_gz2).values
-        X.loc[va_idx, "age_credit_cancel1_rate"] = age_credit_keys_train.iloc[va_idx].map(ac_map1).fillna(ac_gz1).values
-        X.loc[va_idx, "zip_sales_cancel2_rate"] = zip_sales_keys_train.iloc[va_idx].map(zs_map2).fillna(zs_gz2).values
-        X.loc[va_idx, "zip_sales_cancel1_rate"] = zip_sales_keys_train.iloc[va_idx].map(zs_map1).fillna(zs_gz1).values
-        X.loc[va_idx, "cov_dwell_cancel2_rate"] = cov_dwell_keys_train.iloc[va_idx].map(cd_map2).fillna(cd_gz2).values
-        X.loc[va_idx, "cov_dwell_cancel1_rate"] = cov_dwell_keys_train.iloc[va_idx].map(cd_map1).fillna(cd_gz1).values
-
-        # Build fold-specific test copy — each fold's model sees test encoded with
-        # that fold's maps, not a running average of prior folds' maps.
+        # Step 4: Build fold-specific test copy using outer maps
         X_test_fold = X_test.copy()
-        X_test_fold["zip_cancel2_rate"] = X_test["zip.code"].astype(str).map(zip_map2).fillna(gz2).values
-        X_test_fold["zip_cancel1_rate"] = X_test["zip.code"].astype(str).map(zip_map1).fillna(gz1).values
+        zip_map2, zip_map1, gz2, gz1 = outer_maps["zip"]
+        ac_map2, ac_map1, ac_gz2, ac_gz1 = outer_maps["age_credit"]
+        zs_map2, zs_map1, zs_gz2, zs_gz1 = outer_maps["zip_sales"]
+        cd_map2, cd_map1, cd_gz2, cd_gz1 = outer_maps["cov_dwell"]
+
+        X_test_fold["zip_cancel2_rate"] = zip_keys_test.map(zip_map2).fillna(gz2).values
+        X_test_fold["zip_cancel1_rate"] = zip_keys_test.map(zip_map1).fillna(gz1).values
         X_test_fold["age_credit_cancel2_rate"] = age_credit_keys_test.map(ac_map2).fillna(ac_gz2).values
         X_test_fold["age_credit_cancel1_rate"] = age_credit_keys_test.map(ac_map1).fillna(ac_gz1).values
         X_test_fold["zip_sales_cancel2_rate"] = zip_sales_keys_test.map(zs_map2).fillna(zs_gz2).values
@@ -335,6 +426,7 @@ def main():
         X_test_fold["cov_dwell_cancel2_rate"] = cov_dwell_keys_test.map(cd_map2).fillna(cd_gz2).values
         X_test_fold["cov_dwell_cancel1_rate"] = cov_dwell_keys_test.map(cd_map1).fillna(cd_gz1).values
 
+        # Step 5: Train LightGBM
         X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
 
         sample_weights_tr = np.array([CLASS_WEIGHTS[yi] for yi in y_tr])
@@ -350,6 +442,7 @@ def main():
             callbacks=[lgb.early_stopping(EARLY_STOPPING), lgb.log_evaluation(100)],
         )
 
+        # Steps 6 & 7: Predict on validation and test
         va_pred = model.predict(X_va, num_iteration=model.best_iteration)
         oof_preds[va_idx] = va_pred
         test_preds += model.predict(X_test_fold, num_iteration=model.best_iteration) / N_FOLDS
