@@ -2,6 +2,155 @@
 
 ---
 
+## attempt-8: lighter weights, nested OOF, 4 new OOF features — MIXED
+
+Branch: improve/attempt-8
+Date: 2026-05-11
+Runtime: 5326s
+CV accuracy: 0.72783 (raw) → 0.72963 (tuned)
+Std across folds: 0.00047
+Naive baseline: 0.70900
+Hypothesis: Heavy class weights from attempts 4–7 sacrificed class-0 recall, which
+  dominates accuracy (71% of rows). Lighter weights {0:1.0, 1:1.3, 2:1.1} plus
+  post-hoc multiplier tuning should recover class-0 recall while the tuner corrects
+  the decision rule. New OOF features (zip×sales_channel, coverage×dwelling) and
+  nested OOF encoding for training rows (no in-fold leakage) should add marginal
+  signal and improve calibration.
+Changes vs attempt-7:
+  - Class weights lightened: {0:1.0, 1:1.3, 2:1.1} (was {0:1.0, 1:2.0, 2:1.5})
+  - Fixed fold-specific test OOF encoding bug: each fold builds X_test_fold with
+    that fold's maps (was running average of prior folds' maps)
+  - 4 new OOF features: zip_sales_cancel{1,2}_rate, cov_dwell_cancel{1,2}_rate
+    (total OOF features: 8; zip + age_credit retained from attempt-7)
+  - Two-stage multiplier search: coarse (step 0.05) then fine (step 0.01, +-0.10)
+  - Nested OOF encoding for training rows: each outer training fold is split into
+    inner folds so training rows are encoded using other inner-fold rows only
+  - Explicit reset_index on X, X_test, y, and all key Series before fold loop
+
+Result:
+  Tuned accuracy 0.72963 — new high watermark but MIXED (+0.00036 over attempt-5).
+  The lighter weights shifted the optimal multipliers to c1×1.26, c2×0.90 — the
+  opposite direction from attempt-5 (c1×0.95, c2×0.65). With lighter upweighting,
+  the model under-predicts class-1 at argmax; the tuner compensates by scaling up.
+  Class-2 recall fell to 24.8% (vs 35.8% in attempt-4) — confirming that class-2
+  recall tracks directly with class weight strength. Class-0 recall recovered to
+  91.6% (vs 87.5% in attempt-4), and class-1 recall held at 35.9%.
+  All 5 folds converged below 5000 rounds (best iters: 3477, 4079, 3439, 4428, 4865).
+
+Confusion matrix:
+true \ pred    0        1        2
+0              678658   23037    39294
+1              47709    27068    590
+2              159096   12846    56825
+Per-class recall: class-0: 91.6%,  class-1: 35.9%,  class-2: 24.8%
+Verdict: MIXED — 0.72963 tuned (+0.00036 vs prior best 0.72927, attempt-5).
+  New high watermark among all attempts; below +0.001 threshold for PASS.
+Next attempt should try: Optuna hyperparameter tuning — num_leaves, learning_rate,
+  regularization, and min_data_in_leaf have not been tuned since the baseline.
+  The pipeline has 56 features and nested OOF encoding; the hyperparameters should
+  be searched against this full pipeline, not a simplified version.
+
+---
+
+## attempt-7: OOF age×credit encoding + 6 missingness flags — MIXED
+
+Branch: improve/attempt-7
+Date: 2026-05-11
+Runtime: [unknown]
+CV accuracy: [unknown raw] → 0.72945 (tuned)
+Std across folds: [unknown]
+Naive baseline: 0.70900
+Hypothesis: The ni.age×credit interaction shows a 42pp c2-rate spread (10% for
+  elderly/high-credit to 52% for young/low-credit), which is the strongest untapped
+  signal found in feature exploration. OOF target encoding of this pair would give
+  the model the aggregate signal as a numeric feature. Missingness flags for 6
+  columns (~1,000 missing each) have 2–5pp class-rate shifts.
+Changes vs attempt-6:
+  - Dropped XGBoost ensemble (hurt accuracy in attempt-6)
+  - OOF age_credit_cancel{1,2}_rate: smoothed cancel rates per (age_bucket × credit)
+    cell, same implementation as zip cancel rates (k=20 smoothing)
+  - 6 missingness flags: credit_missing, ni_age_missing, n_adults_missing,
+    coverage_type_missing, ni_marital_status_missing, n_children_missing
+  - 52 total features (44 baseline + 8 new)
+
+Result:
+  +0.00018 over attempt-5 (0.72945 vs 0.72927). The age×credit OOF encoding added
+  marginal signal; the missingness flags likely contributed small gains. Result
+  confirms that OOF encoding is most valuable for high-cardinality groups (zip has
+  400+ values; age×credit has only 15 cells and LightGBM already finds those splits).
+
+Confusion matrix: [not recorded]
+Per-class recall: [not recorded]
+Verdict: MIXED — 0.72945 tuned (+0.00018 vs prior best 0.72927, attempt-5)
+Next attempt should try: More OOF features for higher-cardinality interactions,
+  lighter class weights so the model doesn't need such extreme multiplier correction,
+  and a proper nested OOF encoding to eliminate training-fold leakage.
+
+---
+
+## attempt-6: XGBoost ensemble blend — FAIL
+
+Branch: improve/attempt-6
+Date: 2026-05-11
+Runtime: [unknown]
+CV accuracy: [unknown raw] → 0.72711 (tuned)
+Std across folds: [unknown]
+Naive baseline: 0.70900
+Hypothesis: XGBoost uses a different inductive bias and approximation method.
+  Averaging LightGBM and XGBoost OOF probabilities before argmax should reduce
+  variance and move toward an ensemble ceiling above either model alone.
+Changes vs attempt-5:
+  - Added XGBoost (xgb.XGBClassifier) trained per fold
+  - Final predictions: average of LightGBM and XGBoost per-fold probabilities
+
+Result:
+  -0.00216 vs attempt-5. XGBoost handles high-cardinality categoricals (especially
+  zip.code with 400+ values) worse than LightGBM's native categorical splits,
+  resulting in ~0.016 higher logloss. Blending with an inferior model pulled
+  the ensemble down rather than up.
+
+Confusion matrix: [not recorded]
+Per-class recall: [not recorded]
+Verdict: FAIL — 0.72711 tuned (-0.00216 vs prior best 0.72927, attempt-5)
+Next attempt should try: Drop XGBoost. Use LightGBM only with new OOF features
+  targeting the high-signal interactions found in feature exploration.
+
+---
+
+## attempt-5: post-hoc threshold tuning + raised N_ROUNDS — PASS
+
+Branch: improve/attempt-5
+Date: 2026-05-09
+Runtime: [unknown]
+CV accuracy: [unknown raw] → 0.72927 (tuned)
+Std across folds: [unknown]
+Naive baseline: 0.70900
+Hypothesis: Attempt-4 showed that class weights produce well-calibrated
+  probabilities, but the argmax decision rule is wrong for accuracy because
+  class-0 (71% of rows) was sacrificed. Post-hoc multiplier grid search on
+  OOF predictions should correct the decision rule without retraining. Raising
+  N_ROUNDS from 5000 to 10000 allows full convergence (4/5 folds hit the cap
+  in attempt-4).
+Changes vs attempt-4:
+  - Post-hoc 2D multiplier grid search on OOF predictions (c1 and c2 in [0.40, 2.00],
+    step 0.05); apply tuned multipliers to test predictions before argmax
+  - N_ROUNDS raised from 5000 to 10000
+  - Class weights {0:1.0, 1:2.0, 2:1.5} unchanged
+
+Result:
+  +0.00277 vs attempt-4. Tuning found c1×0.95, c2×0.65 — the model was
+  over-calling classes 1 and 2 relative to class-0. Scaling them down recovered
+  substantial class-0 accuracy. This confirms the class weights produce good
+  probability calibration; the issue was purely the argmax decision rule.
+
+Confusion matrix: [not recorded]
+Per-class recall: [not recorded]
+Verdict: PASS — 0.72927 tuned (+0.00277 vs prior attempt-4, new best overall)
+Next attempt should try: New OOF features from feature exploration (age×credit
+  interaction, missingness indicators); XGBoost ensemble blend.
+
+---
+
 ## attempt-4: class weights + zip_cancel1_rate OOF, dropped threshold tuning — FAIL
 
 Branch: improve/attempt-4
