@@ -1,6 +1,6 @@
 """
 NESS Statathon 2026 — Policy Retention Model
-Training pipeline: 5-fold stratified CV with LightGBM on the full 1M-row dataset.
+Training pipeline: 5-fold stratified CV with CatBoost on the full 1M-row dataset.
 
 Outputs:
   - output/submission.csv        Kaggle submission file
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import lightgbm as lgb
+from catboost import CatBoostClassifier, Pool
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import StratifiedKFold
 
@@ -33,48 +33,41 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 SAMPLE_N = None  # None = full 1M rows; set an int to subsample for quick iteration
 N_FOLDS = 5
 RANDOM_STATE = 42
-N_ROUNDS = 10000
-EARLY_STOPPING = 100
 
-ATTEMPT_LABEL = "improve/attempt-8"
+ATTEMPT_LABEL = "improve/attempt-10-catboost"
 ATTEMPT_NOTES = """
-Changes vs attempt-7:
-  - Lighter class weights: {0:1.0, 1:1.3, 2:1.1} (was {0:1.0, 1:2.0, 2:1.5})
-    Heavy weights sacrificed 6.5pp class-0 recall for only 4.6pp recovery in
-    classes 1+2. Lighter weights let threshold tuning do more of the work.
-  - Fixed fold-specific test OOF encoding bug: previously X_test OOF cols used
-    a running average of maps from folds 0..k when fold k predicted on test.
-    Now each fold builds X_test_fold = X_test.copy() with that fold's maps,
-    so fold k's model predicts on test encoded with fold k's map only.
-  - 4 new OOF target-encoded features (in addition to zip + age_credit from attempt-7):
-      zip_sales_cancel2_rate  / zip_sales_cancel1_rate   (zip x sales channel)
-      cov_dwell_cancel2_rate  / cov_dwell_cancel1_rate   (coverage x dwelling)
-  - Two-stage multiplier search: coarse (step 0.05, full range) then fine
-    (step 0.01, +-0.10 around coarse best) for higher-precision tuning.
-  - Retained from attempt-7: 6 missingness flags + age_credit OOF features.
-  - Training-fold target encodings are now nested OOF encodings: each outer
-    training fold is split into inner folds so training rows are encoded with
-    rates computed from other inner-fold rows, not their own labels.
+Changes vs attempt-8:
+  - Model swapped from LightGBM to CatBoost (CatBoostClassifier, MultiClass loss)
+  - align_categoricals removed; cat columns converted to object strings for CatBoost Pool
+  - cat_features passed as integer index list to Pool
+  - Class weights applied via per-sample weight array in Pool (same {0:1.0, 1:1.3, 2:1.1})
+  - Categorical handling: each cat column filled with "missing" string, passed to Pool
+  - Early stopping via od_type="Iter", od_wait=100 in CAT_PARAMS
+  - All feature engineering and OOF encoding unchanged from attempt-8
 """
 
 # Lighter weights: class-0 recall matters more than class-1/2 recall
 # because class-0 is 71% of rows. Threshold tuning corrects the decision rule.
 CLASS_WEIGHTS = {0: 1.0, 1: 1.3, 2: 1.1}
 
-LGB_PARAMS = {
-    "objective": "multiclass",
-    "num_class": 3,
-    "metric": "multi_logloss",
+CAT_PARAMS = {
+    "loss_function": "MultiClass",
+    "classes_count": 3,
+    "eval_metric": "Accuracy",
+    "iterations": 10000,
     "learning_rate": 0.02,
-    "num_leaves": 127,
-    "min_data_in_leaf": 30,
-    "feature_fraction": 0.8,
-    "bagging_fraction": 0.8,
-    "bagging_freq": 5,
-    "lambda_l1": 0.1,
-    "lambda_l2": 1.0,
-    "verbose": -1,
-    "n_jobs": -1,
+    "depth": 7,
+    "min_child_samples": 30,
+    "l2_leaf_reg": 3.0,
+    "rsm": 0.8,
+    "bootstrap_type": "Bernoulli",
+    "subsample": 0.8,
+    "random_seed": RANDOM_STATE,
+    "use_best_model": True,
+    "od_type": "Iter",
+    "od_wait": 100,
+    "verbose": 100,
+    "thread_count": -1,
 }
 
 AGE_BINS = [-np.inf, 25, 35, 50, 65, np.inf]
@@ -130,8 +123,8 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     df["coverage_type_missing"] = df["coverage.type"].isna().astype(int)
     df["ni_marital_status_missing"] = df["ni.marital.status"].isna().astype(int)
     df["n_children_missing"] = df["n.children"].isna().astype(int)
-    # Convert zip.code to string so LightGBM treats it as categorical (nominal),
-    # not numeric. Must happen after add_group_features (which merges on float zip).
+    # Convert zip.code to string so it's treated as categorical (nominal), not numeric.
+    # Must happen after add_group_features (which merges on float zip).
     df["zip.code"] = df["zip.code"].astype("string")
     return df
 
@@ -166,19 +159,6 @@ def add_group_features(df: pd.DataFrame, ref: pd.DataFrame) -> pd.DataFrame:
     df = df.drop(columns=["_dwell_prem_med"])
 
     return df
-
-
-def align_categoricals(
-    X: pd.DataFrame, X_test: pd.DataFrame, cat_cols: list[str]
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    for c in cat_cols:
-        combined = pd.concat(
-            [X[c].astype("string"), X_test[c].astype("string")], ignore_index=True
-        )
-        cats = combined.astype("category").cat.categories
-        X[c] = pd.Categorical(X[c].astype("string"), categories=cats)
-        X_test[c] = pd.Categorical(X_test[c].astype("string"), categories=cats)
-    return X, X_test
 
 
 def make_age_credit_key(df_sub: pd.DataFrame) -> pd.Series:
@@ -316,10 +296,13 @@ def main():
     zip_keys_train = X["zip.code"].astype(str).reset_index(drop=True)
     zip_keys_test = X_test["zip.code"].astype(str).reset_index(drop=True)
 
-    # Align categoricals
+    # Convert categorical columns to plain object strings for CatBoost Pool.
+    # CatBoost needs string values (not pandas Categorical or StringDtype).
     cat_cols = X.select_dtypes(include=["object", "string"]).columns.tolist()
     log(f"Categorical columns: {cat_cols}", t0)
-    X, X_test = align_categoricals(X, X_test, cat_cols)
+    for c in cat_cols:
+        X[c] = X[c].astype(object).fillna("missing")
+        X_test[c] = X_test[c].astype(object).fillna("missing")
 
     # OOF placeholder columns (filled per fold inside the loop — no leakage)
     OOF_COLS = [
@@ -333,6 +316,10 @@ def main():
         X_test[col] = np.nan  # placeholder; overwritten per fold in X_test_fold
 
     log(f"Total features: {X.shape[1]}", t0)
+
+    # Build cat_features index list after all columns are in place
+    col_list = X.columns.tolist()
+    cat_feature_indices = [col_list.index(c) for c in cat_cols]
 
     # Guarantee positional RangeIndex so .loc[tr_idx/va_idx] is unambiguous
     X = X.reset_index(drop=True)
@@ -426,30 +413,27 @@ def main():
         X_test_fold["cov_dwell_cancel2_rate"] = cov_dwell_keys_test.map(cd_map2).fillna(cd_gz2).values
         X_test_fold["cov_dwell_cancel1_rate"] = cov_dwell_keys_test.map(cd_map1).fillna(cd_gz1).values
 
-        # Step 5: Train LightGBM
+        # Step 5: Train CatBoost
         X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
 
         sample_weights_tr = np.array([CLASS_WEIGHTS[yi] for yi in y_tr])
 
-        dtr = lgb.Dataset(X_tr, y_tr, weight=sample_weights_tr, categorical_feature=cat_cols)
-        dva = lgb.Dataset(X_va, y_va, categorical_feature=cat_cols, reference=dtr)
+        train_pool = Pool(X_tr, y_tr, weight=sample_weights_tr, cat_features=cat_feature_indices)
+        val_pool = Pool(X_va, y_va, cat_features=cat_feature_indices)
 
-        model = lgb.train(
-            LGB_PARAMS,
-            dtr,
-            num_boost_round=N_ROUNDS,
-            valid_sets=[dva],
-            callbacks=[lgb.early_stopping(EARLY_STOPPING), lgb.log_evaluation(100)],
-        )
+        model = CatBoostClassifier(**CAT_PARAMS)
+        model.fit(train_pool, eval_set=val_pool)
 
         # Steps 6 & 7: Predict on validation and test
-        va_pred = model.predict(X_va, num_iteration=model.best_iteration)
+        va_pred = model.predict_proba(val_pool)
         oof_preds[va_idx] = va_pred
-        test_preds += model.predict(X_test_fold, num_iteration=model.best_iteration) / N_FOLDS
+
+        test_pool_fold = Pool(X_test_fold, cat_features=cat_feature_indices)
+        test_preds += model.predict_proba(test_pool_fold) / N_FOLDS
 
         fold_acc = accuracy_score(y_va, va_pred.argmax(axis=1))
         fold_scores.append(fold_acc)
-        log(f"  Fold {fold + 1} accuracy: {fold_acc:.5f}  (best iter: {model.best_iteration})", t0)
+        log(f"  Fold {fold + 1} accuracy: {fold_acc:.5f}  (best iter: {model.best_iteration_})", t0)
 
     # Post-hoc threshold tuning — two-stage grid search on OOF predictions
     raw_acc = accuracy_score(y, oof_preds.argmax(axis=1))
@@ -500,6 +484,9 @@ def main():
     overall_acc = accuracy_score(y, oof_class)
     cm = confusion_matrix(y, oof_class)
 
+    # Test prediction distribution
+    test_dist = pd.Series(test_class).value_counts().sort_index()
+
     summary = []
     summary.append("=" * 60)
     summary.append(f"5-fold CV accuracy (mean): {np.mean(fold_scores):.5f}")
@@ -519,6 +506,10 @@ def main():
             )
         )
     )
+    summary.append("\nTest prediction distribution:")
+    for cls in range(3):
+        cnt = test_dist.get(cls, 0)
+        summary.append(f"  class {cls}: {cnt:,} ({cnt / len(test_class) * 100:.1f}%)")
     print("\n" + "\n".join(summary))
 
     (OUTPUT_DIR / "cv_results.txt").write_text("\n".join(summary))
