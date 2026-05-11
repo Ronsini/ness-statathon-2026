@@ -415,6 +415,8 @@ def main():
     lines.append('    "objective": "multiclass",')
     lines.append('    "num_class": 3,')
     lines.append('    "metric": "multi_logloss",')
+    lines.append('    "feature_pre_filter": False,')
+    lines.append('    "zero_as_missing": False,')
     for k, v in best.params.items():
         if isinstance(v, float):
             lines.append(f'    "{k}": {v:.6f},')
