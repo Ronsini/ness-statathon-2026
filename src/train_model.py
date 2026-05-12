@@ -452,9 +452,6 @@ def main():
 
     log(f"Total features: {X.shape[1]}", t0)
 
-    # cat_feature_indices after all columns are fixed (for CatBoost string copies)
-    cat_feature_indices_ref = list(range(len(cat_cols)))  # rebuilt per fold from string copy
-
     # Guarantee positional RangeIndex so .loc[tr_idx/va_idx] is unambiguous
     X = X.reset_index(drop=True)
     X_test = X_test.reset_index(drop=True)
