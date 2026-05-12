@@ -46,9 +46,9 @@ Changes vs attempt-8:
     CatBoost weight = 1 - w. For each w, run 2-stage multiplier search
     (coarse c1/c2 in [0.40, 2.00] step 0.05, fine step 0.01 +-0.10).
     Best (w, c1, c2) combination chosen by OOF accuracy.
-  - align_categoricals replaced with string conversion
-    (astype("string").fillna("missing").astype(str)) — works for both models.
-  - cat_feature_indices (integer list) built for CatBoost Pool.
+  - LightGBM keeps pandas Categorical columns via align_categoricals.
+  - CatBoost uses per-fold string copies of X_tr, X_va, and X_test_fold,
+    because CatBoost needs plain string categorical values.
   - LGB_PARAMS, CLASS_WEIGHTS, and all feature engineering unchanged from attempt-8.
   - CAT_PARAMS: same as attempt-10 (depth=7, learning_rate=0.02, od_wait=100).
 """
