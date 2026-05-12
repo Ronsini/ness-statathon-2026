@@ -37,24 +37,24 @@ RANDOM_STATE = 42
 N_ROUNDS = 10000
 EARLY_STOPPING = 100
 
-ATTEMPT_LABEL = "improve/attempt-11-lgb-cat-blend"
+ATTEMPT_LABEL = "improve/attempt-12-leak-count-features"
 ATTEMPT_NOTES = """
-Changes vs attempt-8:
-  - Added CatBoostClassifier trained in parallel with LightGBM inside each fold.
-    Separate OOF and test probability arrays collected for each model.
-  - Post-CV blend search: LGB weight w in [0.70, 1.00] step 0.05,
-    CatBoost weight = 1 - w. For each w, run 2-stage multiplier search
-    (coarse c1/c2 in [0.40, 2.00] step 0.05, fine step 0.01 +-0.10).
-    Best (w, c1, c2) combination chosen by OOF accuracy.
-  - LightGBM keeps pandas Categorical columns via align_categoricals.
-  - CatBoost uses per-fold string copies of X_tr, X_va, and X_test_fold,
-    because CatBoost needs plain string categorical values.
-  - LGB_PARAMS, CLASS_WEIGHTS, and all feature engineering unchanged from attempt-8.
-  - CAT_PARAMS: same as attempt-10 (depth=7, learning_rate=0.02, od_wait=100).
+Changes vs attempt-11 (best CV/public model):
+  - Kept LightGBM + CatBoost blend with per-weight multiplier tuning (attempt-11 baseline)
+  - Added frequency/count features for 8 categorical columns (col_count, col_freq):
+      zip.code, sales.channel, credit, coverage.type, dwelling.type,
+      house.color, original_quote_weekday, season_of_renewal
+  - Added is_first_year_with_claim: (tenure < 1.1) & (claim.ind == 1), 31% c2 rate
+  - Added 5 extra missingness flags: len.at.res, sales.channel, tenure, premium, square_footage
+  - Added age_credit_key as a raw categorical feature (age bucket + credit tier string)
+  - Added profile OOF target encoding (zip x credit x sales x coverage x dwelling x claim x year),
+    smoothing k=100; captures full-context cancel rates for common policy profiles
+  - Added zip_year OOF target encoding (zip x year), smoothing k=150; captures year-cohort
+    variation within zips (2014 has 6.7pp higher c2 rate than 2016)
+  - All new OOF features use nested OOF for training rows (no leakage)
+  - Total features: 83 (was 56)
 """
 
-# Lighter weights: class-0 recall matters more than class-1/2 recall
-# because class-0 is 71% of rows. Threshold tuning corrects the decision rule.
 CLASS_WEIGHTS = {0: 1.0, 1: 1.3, 2: 1.1}
 
 LGB_PARAMS = {
@@ -97,6 +97,11 @@ CAT_PARAMS = {
 AGE_BINS = [-np.inf, 25, 35, 50, 65, np.inf]
 AGE_LABELS = ["lt25", "25-35", "35-50", "50-65", "65plus"]
 
+FREQ_COLS = [
+    "zip.code", "sales.channel", "credit", "coverage.type",
+    "dwelling.type", "house.color", "original_quote_weekday", "season_of_renewal",
+]
+
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -126,6 +131,9 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
         (df["ni.age"].fillna(99) < 30) & (df["claim.ind"].fillna(0) == 1)
     ).astype(int)
     df["new_customer"] = (df["tenure"].fillna(99) < 3).astype(int)
+    df["is_first_year_with_claim"] = (
+        (df["tenure"].fillna(99) < 1.1) & (df["claim.ind"].fillna(0) == 1)
+    ).astype(int)
     df["log_premium"] = np.log1p(df["premium"].fillna(0))
     df["log_tenure"] = np.log1p(df["tenure"].fillna(0))
     df["log_square_footage"] = np.log1p(df["square_footage"].fillna(0))
@@ -140,14 +148,20 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     df["tenure_x_credit"] = df["log_tenure"] * df["credit_ordinal"].fillna(1)
     df["res_tenure_ratio"] = df["len.at.res"].fillna(0) / (df["tenure"].fillna(0) + 1)
     df["premium_credit_stress"] = df["premium"].fillna(0) / (df["credit_ordinal"].fillna(0) + 1)
-    # Missingness indicators — ~1,000 rows missing per column; class-rate shifts confirmed
+    # Missingness indicators (original 6)
     df["credit_missing"] = df["credit"].isna().astype(int)
     df["ni_age_missing"] = df["ni.age"].isna().astype(int)
     df["n_adults_missing"] = df["n.adults"].isna().astype(int)
     df["coverage_type_missing"] = df["coverage.type"].isna().astype(int)
     df["ni_marital_status_missing"] = df["ni.marital.status"].isna().astype(int)
     df["n_children_missing"] = df["n.children"].isna().astype(int)
-    # Convert zip.code to string so it's treated as categorical (nominal), not numeric.
+    # Extra missingness flags (from feature exploration)
+    df["len_at_res_missing"] = df["len.at.res"].isna().astype(int)
+    df["sales_channel_missing"] = df["sales.channel"].isna().astype(int)
+    df["tenure_missing"] = df["tenure"].isna().astype(int)
+    df["premium_missing"] = df["premium"].isna().astype(int)
+    df["square_footage_missing"] = df["square_footage"].isna().astype(int)
+    # Convert zip.code to string so it's treated as categorical, not numeric.
     # Must happen after add_group_features (which merges on float zip).
     df["zip.code"] = df["zip.code"].astype("string")
     return df
@@ -185,6 +199,22 @@ def add_group_features(df: pd.DataFrame, ref: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_frequency_features(
+    X: pd.DataFrame, X_test: pd.DataFrame, cols: list[str]
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Count and frequency encoding computed on training data, applied to train and test."""
+    for c in cols:
+        x_vals = X[c].astype("string").fillna("missing")
+        xt_vals = X_test[c].astype("string").fillna("missing")
+        counts = x_vals.value_counts()
+        freqs = counts / len(X)
+        X[f"{c}_count"] = x_vals.map(counts).fillna(0).astype(float)
+        X_test[f"{c}_count"] = xt_vals.map(counts).fillna(0).astype(float)
+        X[f"{c}_freq"] = x_vals.map(freqs).fillna(0).astype(float)
+        X_test[f"{c}_freq"] = xt_vals.map(freqs).fillna(0).astype(float)
+    return X, X_test
+
+
 def align_categoricals(
     X: pd.DataFrame, X_test: pd.DataFrame, cat_cols: list[str]
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -199,7 +229,6 @@ def align_categoricals(
 
 
 def make_age_credit_key(df_sub: pd.DataFrame) -> pd.Series:
-    """Combine age bucket and credit tier into a group key for OOF encoding."""
     age = df_sub["ni.age"]
     age_bucket = pd.cut(age, bins=AGE_BINS, labels=AGE_LABELS).astype(object)
     age_bucket = pd.Series(age_bucket, index=df_sub.index).where(~age.isna(), other="unknown")
@@ -208,17 +237,31 @@ def make_age_credit_key(df_sub: pd.DataFrame) -> pd.Series:
 
 
 def make_zip_sales_key(df_sub: pd.DataFrame) -> pd.Series:
-    """Combine zip code and sales channel into a group key for OOF encoding."""
     zip_str = df_sub["zip.code"].astype(object).fillna("missing").astype(str)
     chan_str = df_sub["sales.channel"].astype(object).fillna("missing").astype(str)
     return (zip_str + "_" + chan_str).rename(None)
 
 
 def make_cov_dwell_key(df_sub: pd.DataFrame) -> pd.Series:
-    """Combine coverage type and dwelling type into a group key for OOF encoding."""
     cov_str = df_sub["coverage.type"].astype(object).fillna("missing").astype(str)
     dwell_str = df_sub["dwelling.type"].astype(object).fillna("missing").astype(str)
     return (cov_str + "_" + dwell_str).rename(None)
+
+
+def make_profile_key(df_sub: pd.DataFrame) -> pd.Series:
+    """Full-context key: zip × credit × sales × coverage × dwelling × claim × year."""
+    cols = ["zip.code", "credit", "sales.channel", "coverage.type", "dwelling.type", "claim.ind", "year"]
+    key = df_sub[cols[0]].astype("string").fillna("missing").astype(str)
+    for c in cols[1:]:
+        key = key + "_" + df_sub[c].astype("string").fillna("missing").astype(str)
+    return key.rename(None)
+
+
+def make_zip_year_key(df_sub: pd.DataFrame) -> pd.Series:
+    """zip × year — captures year-cohort effects within each zip code."""
+    zip_str = df_sub["zip.code"].astype("string").fillna("missing").astype(str)
+    year_str = df_sub["year"].astype("string").fillna("missing").astype(str)
+    return (zip_str + "_" + year_str).rename(None)
 
 
 def compute_oof_rates(
@@ -246,27 +289,40 @@ def build_encoding_maps(
     age_credit_keys: pd.Series,
     zip_sales_keys: pd.Series,
     cov_dwell_keys: pd.Series,
-    smooth_k: int,
+    profile_keys: pd.Series,
+    zip_year_keys: pd.Series,
+    smooth_k: int = 20,
+    profile_k: int = 100,
+    zip_year_k: int = 150,
 ) -> dict:
     """Build all target-encoding maps using only the selected source rows."""
     y_part = y_source[row_idx]
     zip_maps = compute_oof_rates(
-        X_source.iloc[row_idx]["zip.code"].astype(str).reset_index(drop=True),
-        y_part, smooth_k,
+        X_source.iloc[row_idx]["zip.code"].astype(str).reset_index(drop=True), y_part, smooth_k,
     )
     ac_maps = compute_oof_rates(
-        age_credit_keys.iloc[row_idx].reset_index(drop=True),
-        y_part, smooth_k,
+        age_credit_keys.iloc[row_idx].reset_index(drop=True), y_part, smooth_k,
     )
     zs_maps = compute_oof_rates(
-        zip_sales_keys.iloc[row_idx].reset_index(drop=True),
-        y_part, smooth_k,
+        zip_sales_keys.iloc[row_idx].reset_index(drop=True), y_part, smooth_k,
     )
     cd_maps = compute_oof_rates(
-        cov_dwell_keys.iloc[row_idx].reset_index(drop=True),
-        y_part, smooth_k,
+        cov_dwell_keys.iloc[row_idx].reset_index(drop=True), y_part, smooth_k,
     )
-    return {"zip": zip_maps, "age_credit": ac_maps, "zip_sales": zs_maps, "cov_dwell": cd_maps}
+    prof_maps = compute_oof_rates(
+        profile_keys.iloc[row_idx].reset_index(drop=True), y_part, profile_k,
+    )
+    zy_maps = compute_oof_rates(
+        zip_year_keys.iloc[row_idx].reset_index(drop=True), y_part, zip_year_k,
+    )
+    return {
+        "zip": zip_maps,
+        "age_credit": ac_maps,
+        "zip_sales": zs_maps,
+        "cov_dwell": cd_maps,
+        "profile": prof_maps,
+        "zip_year": zy_maps,
+    }
 
 
 def fill_rate_columns(
@@ -276,13 +332,17 @@ def fill_rate_columns(
     age_credit_keys: pd.Series,
     zip_sales_keys: pd.Series,
     cov_dwell_keys: pd.Series,
+    profile_keys: pd.Series,
+    zip_year_keys: pd.Series,
     maps: dict,
 ) -> None:
-    """Fill target-encoding columns for selected rows using already-built maps."""
+    """Fill all target-encoding columns for selected rows using already-built maps."""
     zip_map2, zip_map1, gz2, gz1 = maps["zip"]
     ac_map2, ac_map1, ac_gz2, ac_gz1 = maps["age_credit"]
     zs_map2, zs_map1, zs_gz2, zs_gz1 = maps["zip_sales"]
     cd_map2, cd_map1, cd_gz2, cd_gz1 = maps["cov_dwell"]
+    prof_map2, prof_map1, prof_gz2, prof_gz1 = maps["profile"]
+    zy_map2, zy_map1, zy_gz2, zy_gz1 = maps["zip_year"]
 
     X_target.loc[row_idx, "zip_cancel2_rate"] = zip_keys.iloc[row_idx].map(zip_map2).fillna(gz2).values
     X_target.loc[row_idx, "zip_cancel1_rate"] = zip_keys.iloc[row_idx].map(zip_map1).fillna(gz1).values
@@ -292,6 +352,10 @@ def fill_rate_columns(
     X_target.loc[row_idx, "zip_sales_cancel1_rate"] = zip_sales_keys.iloc[row_idx].map(zs_map1).fillna(zs_gz1).values
     X_target.loc[row_idx, "cov_dwell_cancel2_rate"] = cov_dwell_keys.iloc[row_idx].map(cd_map2).fillna(cd_gz2).values
     X_target.loc[row_idx, "cov_dwell_cancel1_rate"] = cov_dwell_keys.iloc[row_idx].map(cd_map1).fillna(cd_gz1).values
+    X_target.loc[row_idx, "profile_cancel2_rate"] = profile_keys.iloc[row_idx].map(prof_map2).fillna(prof_gz2).values
+    X_target.loc[row_idx, "profile_cancel1_rate"] = profile_keys.iloc[row_idx].map(prof_map1).fillna(prof_gz1).values
+    X_target.loc[row_idx, "zip_year_cancel2_rate"] = zip_year_keys.iloc[row_idx].map(zy_map2).fillna(zy_gz2).values
+    X_target.loc[row_idx, "zip_year_cancel1_rate"] = zip_year_keys.iloc[row_idx].map(zy_map1).fillna(zy_gz1).values
 
 
 def tune_multipliers(oof_probs: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
@@ -337,7 +401,7 @@ def main():
     X = train.drop(columns=["id", "cancel"])
     X_test = test.drop(columns=["id"])
 
-    # Group features — computed on full training set to give stable statistics
+    # Group features — computed on full training set
     log("Adding group features...", t0)
     X = add_group_features(X, X)
     X_test = add_group_features(X_test, X)
@@ -346,34 +410,50 @@ def main():
     X = add_engineered_features(X)
     X_test = add_engineered_features(X_test)
 
-    # Pre-compute group keys for OOF encoding (done once on full data, no target used)
+    # Frequency/count features — training counts only, no target used
+    log("Adding frequency features...", t0)
+    X, X_test = add_frequency_features(X, X_test, FREQ_COLS)
+
+    # Pre-compute group keys for OOF encoding
     age_credit_keys_train = make_age_credit_key(X)
     age_credit_keys_test = make_age_credit_key(X_test)
     zip_sales_keys_train = make_zip_sales_key(X)
     zip_sales_keys_test = make_zip_sales_key(X_test)
     cov_dwell_keys_train = make_cov_dwell_key(X)
     cov_dwell_keys_test = make_cov_dwell_key(X_test)
+    profile_keys_train = make_profile_key(X)
+    profile_keys_test = make_profile_key(X_test)
+    zip_year_keys_train = make_zip_year_key(X)
+    zip_year_keys_test = make_zip_year_key(X_test)
     zip_keys_train = X["zip.code"].astype(str).reset_index(drop=True)
     zip_keys_test = X_test["zip.code"].astype(str).reset_index(drop=True)
 
-    # LightGBM requires pandas Categorical dtype for categorical columns.
-    # align_categoricals unifies train/test categories so LightGBM sees the same encoding.
+    # age_credit_key as a raw categorical feature (must be added before cat_cols detection)
+    X["age_credit_key"] = age_credit_keys_train.astype("string")
+    X_test["age_credit_key"] = age_credit_keys_test.astype("string")
+
+    # LightGBM requires pandas Categorical dtype; align_categoricals unifies categories
     cat_cols = X.select_dtypes(include=["object", "string"]).columns.tolist()
-    log(f"Categorical columns: {cat_cols}", t0)
+    log(f"Categorical columns ({len(cat_cols)}): {cat_cols}", t0)
     X, X_test = align_categoricals(X, X_test, cat_cols)
 
-    # OOF placeholder columns (filled per fold inside the loop — no leakage)
+    # OOF placeholder columns (filled per fold — no leakage)
     OOF_COLS = [
         "zip_cancel2_rate", "zip_cancel1_rate",
         "age_credit_cancel2_rate", "age_credit_cancel1_rate",
         "zip_sales_cancel2_rate", "zip_sales_cancel1_rate",
         "cov_dwell_cancel2_rate", "cov_dwell_cancel1_rate",
+        "profile_cancel2_rate", "profile_cancel1_rate",
+        "zip_year_cancel2_rate", "zip_year_cancel1_rate",
     ]
     for col in OOF_COLS:
         X[col] = np.nan
         X_test[col] = np.nan
 
     log(f"Total features: {X.shape[1]}", t0)
+
+    # cat_feature_indices after all columns are fixed (for CatBoost string copies)
+    cat_feature_indices_ref = list(range(len(cat_cols)))  # rebuilt per fold from string copy
 
     # Guarantee positional RangeIndex so .loc[tr_idx/va_idx] is unambiguous
     X = X.reset_index(drop=True)
@@ -385,6 +465,10 @@ def main():
     zip_sales_keys_test = zip_sales_keys_test.reset_index(drop=True)
     cov_dwell_keys_train = cov_dwell_keys_train.reset_index(drop=True)
     cov_dwell_keys_test = cov_dwell_keys_test.reset_index(drop=True)
+    profile_keys_train = profile_keys_train.reset_index(drop=True)
+    profile_keys_test = profile_keys_test.reset_index(drop=True)
+    zip_year_keys_train = zip_year_keys_train.reset_index(drop=True)
+    zip_year_keys_test = zip_year_keys_test.reset_index(drop=True)
     zip_keys_train = zip_keys_train.reset_index(drop=True)
     zip_keys_test = zip_keys_test.reset_index(drop=True)
 
@@ -405,9 +489,7 @@ def main():
 
         # Nested OOF encoding for training rows (no leakage into own labels)
         inner_skf = StratifiedKFold(
-            n_splits=N_FOLDS,
-            shuffle=True,
-            random_state=RANDOM_STATE + fold + 100,
+            n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE + fold + 100,
         )
         for inner_tr_pos, inner_va_pos in inner_skf.split(X.iloc[tr_idx], y_tr):
             inner_tr_idx = tr_idx[inner_tr_pos]
@@ -417,6 +499,8 @@ def main():
                 age_credit_keys=age_credit_keys_train,
                 zip_sales_keys=zip_sales_keys_train,
                 cov_dwell_keys=cov_dwell_keys_train,
+                profile_keys=profile_keys_train,
+                zip_year_keys=zip_year_keys_train,
                 smooth_k=smooth_k,
             )
             fill_rate_columns(
@@ -425,6 +509,8 @@ def main():
                 age_credit_keys=age_credit_keys_train,
                 zip_sales_keys=zip_sales_keys_train,
                 cov_dwell_keys=cov_dwell_keys_train,
+                profile_keys=profile_keys_train,
+                zip_year_keys=zip_year_keys_train,
                 maps=inner_maps,
             )
 
@@ -434,6 +520,8 @@ def main():
             age_credit_keys=age_credit_keys_train,
             zip_sales_keys=zip_sales_keys_train,
             cov_dwell_keys=cov_dwell_keys_train,
+            profile_keys=profile_keys_train,
+            zip_year_keys=zip_year_keys_train,
             smooth_k=smooth_k,
         )
         fill_rate_columns(
@@ -442,6 +530,8 @@ def main():
             age_credit_keys=age_credit_keys_train,
             zip_sales_keys=zip_sales_keys_train,
             cov_dwell_keys=cov_dwell_keys_train,
+            profile_keys=profile_keys_train,
+            zip_year_keys=zip_year_keys_train,
             maps=outer_maps,
         )
 
@@ -451,6 +541,9 @@ def main():
         ac_map2, ac_map1, ac_gz2, ac_gz1 = outer_maps["age_credit"]
         zs_map2, zs_map1, zs_gz2, zs_gz1 = outer_maps["zip_sales"]
         cd_map2, cd_map1, cd_gz2, cd_gz1 = outer_maps["cov_dwell"]
+        prof_map2, prof_map1, prof_gz2, prof_gz1 = outer_maps["profile"]
+        zy_map2, zy_map1, zy_gz2, zy_gz1 = outer_maps["zip_year"]
+
         X_test_fold["zip_cancel2_rate"] = zip_keys_test.map(zip_map2).fillna(gz2).values
         X_test_fold["zip_cancel1_rate"] = zip_keys_test.map(zip_map1).fillna(gz1).values
         X_test_fold["age_credit_cancel2_rate"] = age_credit_keys_test.map(ac_map2).fillna(ac_gz2).values
@@ -459,6 +552,10 @@ def main():
         X_test_fold["zip_sales_cancel1_rate"] = zip_sales_keys_test.map(zs_map1).fillna(zs_gz1).values
         X_test_fold["cov_dwell_cancel2_rate"] = cov_dwell_keys_test.map(cd_map2).fillna(cd_gz2).values
         X_test_fold["cov_dwell_cancel1_rate"] = cov_dwell_keys_test.map(cd_map1).fillna(cd_gz1).values
+        X_test_fold["profile_cancel2_rate"] = profile_keys_test.map(prof_map2).fillna(prof_gz2).values
+        X_test_fold["profile_cancel1_rate"] = profile_keys_test.map(prof_map1).fillna(prof_gz1).values
+        X_test_fold["zip_year_cancel2_rate"] = zip_year_keys_test.map(zy_map2).fillna(zy_gz2).values
+        X_test_fold["zip_year_cancel1_rate"] = zip_year_keys_test.map(zy_map1).fillna(zy_gz1).values
 
         X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
         sample_weights_tr = np.array([CLASS_WEIGHTS[yi] for yi in y_tr])
@@ -505,7 +602,7 @@ def main():
     # Individual model raw OOF
     lgb_raw_acc = accuracy_score(y, lgb_oof_preds.argmax(axis=1))
     cat_raw_acc = accuracy_score(y, cat_oof_preds.argmax(axis=1))
-    log(f"LGB raw OOF accuracy:     {lgb_raw_acc:.5f}", t0)
+    log(f"LGB raw OOF accuracy:      {lgb_raw_acc:.5f}", t0)
     log(f"CatBoost raw OOF accuracy: {cat_raw_acc:.5f}", t0)
 
     # Blend + multiplier search
@@ -528,7 +625,7 @@ def main():
     print(f"Best multipliers: c0x1.00  c1x{best_c1:.3f}  c2x{best_c2:.3f}")
     print(f"Best tuned OOF accuracy: {best_blend_acc:.5f}")
 
-    # Apply best blend to produce final predictions
+    # Apply best blend
     blend_oof_final = best_w * lgb_oof_preds + (1.0 - best_w) * cat_oof_preds
     blend_test_final = best_w * lgb_test_preds + (1.0 - best_w) * cat_test_preds
     mult_arr = np.array([1.0, best_c1, best_c2])
@@ -583,7 +680,7 @@ def main():
     with open(log_path, "a") as f:
         f.write(entry + "\n")
 
-    sub = pd.DataFrame({"Id": test_ids, "Predicted": test_class})
+    sub = pd.DataFrame({"id": test_ids, "Predicted": test_class})
     sub.to_csv(OUTPUT_DIR / "submission.csv", index=False)
     log(f"Saved submission to {OUTPUT_DIR / 'submission.csv'}", t0)
     log(f"Total runtime: {time.time() - t0:.0f}s", t0)
