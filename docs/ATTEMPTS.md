@@ -8,6 +8,7 @@ Branch: improve/attempt-8
 Date: 2026-05-11
 Runtime: 5326s
 CV accuracy: 0.72783 (raw) → 0.72963 (tuned)
+Public leaderboard: 0.74099
 Std across folds: 0.00047
 Naive baseline: 0.70900
 Hypothesis: Heavy class weights from attempts 4–7 sacrificed class-0 recall, which

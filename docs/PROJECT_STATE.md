@@ -10,6 +10,8 @@ Submission file: output/submission.csv
 > Note: attempt-8 (0.72963 tuned) is the new high watermark but MIXED (+0.00036).
 > PROJECT_STATE.md updates on PASS only. Current best stays at attempt-5 until
 > an attempt beats 0.72927 + 0.001 = 0.73027.
+>
+> Public leaderboard best: attempt-8 at 0.74099.
 
 ## Pipeline summary (attempt-8)
 
