@@ -50,14 +50,16 @@ Decision rule: two-stage multiplier search (coarse step 0.05, fine step 0.01 ±0
 
 ## What's been tried (newest first)
 
-attempt-8: MIXED +0.00036 — lighter weights {0:1, 1:1.3, 2:1.1}, nested OOF encoding, 4 new OOF features
-attempt-7: MIXED +0.00018 — OOF age×credit encoding + 6 missingness flags (52 features)
-attempt-6: FAIL  -0.00216 — XGBoost ensemble blend (zip.code handling inferior)
-attempt-5: PASS  +0.00277 — post-hoc 2D multiplier tuning + N_ROUNDS raised to 10000
-attempt-4: FAIL  -0.00134 — class weights {0:1, 1:2, 2:1.5} + zip_cancel1_rate OOF
-attempt-3: MIXED +0.00050 — 4 new interaction features + class-2 threshold tuning
-attempt-2: MIXED +0.00030 — slower/deeper training + OOF zip encoding + credit ordinal
-attempt-1: PASS  baseline — LightGBM on 300k subsample (0.72570)
+attempt-10: FAIL  -0.00259 — CatBoost swap; 0 class-1 predictions, converged at 207-225 iters
+attempt-9:  FAIL (tuning) — Optuna tune_params.py; c1 hit 0.300 floor; params not adopted
+attempt-8:  MIXED +0.00036 — lighter weights {0:1, 1:1.3, 2:1.1}, nested OOF encoding, 4 new OOF features
+attempt-7:  MIXED +0.00018 — OOF age×credit encoding + 6 missingness flags (52 features)
+attempt-6:  FAIL  -0.00216 — XGBoost ensemble blend (zip.code handling inferior)
+attempt-5:  PASS  +0.00277 — post-hoc 2D multiplier tuning + N_ROUNDS raised to 10000
+attempt-4:  FAIL  -0.00134 — class weights {0:1, 1:2, 2:1.5} + zip_cancel1_rate OOF
+attempt-3:  MIXED +0.00050 — 4 new interaction features + class-2 threshold tuning
+attempt-2:  MIXED +0.00030 — slower/deeper training + OOF zip encoding + credit ordinal
+attempt-1:  PASS  baseline — LightGBM on 300k subsample (0.72570)
 
 ## Lessons learned
 
@@ -77,20 +79,24 @@ attempt-1: PASS  baseline — LightGBM on 300k subsample (0.72570)
   3477–4865 rounds, confirming 10000 is the right cap.
 - zip.code is the dominant feature by gain. OOF encoding of zip cancel rates adds
   meaningful signal on top of the native categorical.
-- XGBoost is inferior to LightGBM on this dataset because zip.code (400+ values,
-  #1 feature) is handled better by LightGBM's native categorical splits.
+- Alternative models (XGBoost attempt-6, CatBoost attempt-10) are both inferior to
+  LightGBM on this dataset. zip.code (400+ values, #1 feature by gain) is the
+  bottleneck: LightGBM's native categorical splits handle it better. CatBoost also
+  collapsed to zero class-1 predictions and converged in ~200 iterations (vs
+  LightGBM's 3000-5000), confirming the model architecture is less expressive here.
+  LightGBM is the right base model — do not revisit alternatives.
 - email_domain, house.color, original_quote_weekday, season_of_renewal: near-zero
   class-2 signal spread. Confirmed noise; not worth investigating.
 
 ## Open ideas (untried)
 
-- Optuna hyperparameter search on LightGBM with the full 56-feature pipeline
-  (tune_params.py exists but uses a different feature set — needs to be rewritten
-  to match train_model.py's pipeline)
 - is_first_year_with_claim: (tenure < 1.1) & (claim.ind == 1), 31% c2 rate vs 21.9%
-  overall (+9.1pp). Small segment but cleanly separable.
+  overall (+9.1pp). Small segment but cleanly separable. Cheap to add.
 - zip_frequency: count of training rows per zip code. Rare zips have 40–50% c2 rate
-  vs 18–24% for common zips — clean monotone signal complementing OOF rates.
+  vs 18–24% for common zips — clean monotone signal complementing OOF rates. Cheap.
+- Optuna hyperparameter search on LightGBM WITHOUT class weights (attempt-9 failed
+  because weights distorted calibration during tuning). Disable CLASS_WEIGHTS in
+  tune_params.py, re-run, then adopt params and re-enable weights in train_model.py.
 - Ordinal regression approach: two binary classifiers P(cancel≥1) and P(cancel≥2)
   exploiting the ordered class structure (cancel 0 < 1 < 2)
 - Feature pruning: drop near-zero-gain features (email_domain, house.color,
