@@ -78,7 +78,7 @@ XGB_PARAMS = {
 }
 
 # High-cardinality: count + frequency encoding (no target)
-HIGH_CARD_COLS = ["zip.code", "house.color", "email_domain", "sales.channel"]
+HIGH_CARD_COLS = ["zip.code", "house.color", "email_domain"]
 
 # Low-cardinality: one-hot encoding (combined train+test for column alignment)
 LOW_CARD_COLS = [
@@ -364,6 +364,9 @@ def main():
     bad_cols = X.select_dtypes(include=["object", "string", "category"]).columns.tolist()
     if bad_cols:
         raise ValueError(f"Non-numeric columns remain: {bad_cols}")
+
+    X = X.astype(float)
+    X_test = X_test.astype(float)
 
     # OOF placeholder columns (filled per fold inside the loop — no leakage)
     for col in OOF_COLS:
