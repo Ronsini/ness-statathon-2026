@@ -2,6 +2,137 @@
 
 ---
 
+## attempt-11: LightGBM + CatBoost blend — MIXED
+
+Branch: improve/attempt-11-lgb-cat-blend
+Date: 2026-05-12
+Runtime: 5175s
+CV accuracy: LGB 0.72783 (raw) / CAT 0.72610 (raw) → 0.72966 (blend tuned)
+Std across folds: LGB 0.00047 / CAT 0.00064
+Naive baseline: 0.70900
+Hypothesis: CatBoost provides a different inductive bias even though it is weaker
+  individually. A conservative 5–30% CatBoost contribution blended with the
+  attempt-8 LightGBM might add orthogonal variance reduction and push past the
+  LightGBM ceiling of 0.72963.
+Changes vs attempt-8:
+  - CatBoostClassifier trained in parallel with LightGBM inside each fold
+  - Separate OOF and test probability arrays for each model
+  - Post-CV blend search: LGB weight w in [0.70, 1.00] step 0.05; for each w,
+    run full 2-stage c1/c2 multiplier search (coarse step 0.05, fine step 0.01)
+  - LightGBM keeps pandas Categorical dtype via align_categoricals
+  - CatBoost uses per-fold string copies (X_tr_cat, X_va_cat, X_test_cat)
+  - LGB_PARAMS and all feature engineering unchanged from attempt-8
+  - CAT_PARAMS: same as attempt-10 (depth=7, learning_rate=0.02, od_wait=100)
+
+Result:
+  Tuned accuracy 0.72966 — MIXED (+0.00039 vs attempt-5 best of 0.72927).
+  New high watermark, barely above attempt-8 (0.72963 → 0.72966, +0.00003).
+  Best blend: 95% LGB + 5% CatBoost — the minimum CatBoost contribution tested.
+  Any heavier CatBoost weight hurt: w=0.90 also reached 0.72966, w=0.85 fell to
+  0.72954, w=0.70 fell to 0.72909. Adding a weaker model yields only noise-level
+  gains at small weights and negative returns beyond 10%.
+  Compared to attempt-8: class-0 recall improved 0.8pp (91.6% → 92.4%), but
+  class-1 fell 2.3pp (35.9% → 33.6%) and class-2 fell 1.7pp (24.8% → 23.1%).
+  The +0.00003 gain over pure LightGBM does not justify 2× runtime.
+
+Confusion matrix:
+true \ pred    0        1        2
+0              684461   21598    34930
+1              49676    25361    330
+2              163851   12156    52760
+Per-class recall: class-0: 92.4%,  class-1: 33.6%,  class-2: 23.1%
+Verdict: MIXED — 0.72966 tuned (+0.00039 vs prior best 0.72927, attempt-5).
+  New high watermark (+0.00003 over attempt-8); below +0.001 threshold for PASS.
+Next attempt should try: Return to pure LightGBM. Blend with CatBoost is confirmed
+  marginal. Try is_first_year_with_claim and zip_frequency — cheap features with
+  measured signal that have not been tested yet in the full pipeline.
+
+---
+
+## attempt-10: CatBoost swap — FAIL
+
+Branch: improve/attempt-10-catboost
+Date: 2026-05-11
+Runtime: 895s
+CV accuracy: 0.72610 (raw) → 0.72668 (tuned)
+Std across folds: 0.00064
+Naive baseline: 0.70900
+Hypothesis: CatBoost has a different inductive bias and handles categoricals via
+  ordered target encoding internally. Swapping LightGBM for CatBoost while keeping
+  the full attempt-8 feature pipeline (56 features, nested OOF encoding, class weights
+  {0:1.0, 1:1.3, 2:1.1}) might extract different signal, especially from the dominant
+  high-cardinality zip.code feature.
+Changes vs attempt-8:
+  - Model: LightGBM → CatBoostClassifier (MultiClass loss, Accuracy eval metric)
+  - align_categoricals removed; cat columns converted via astype("string").fillna("missing").astype(str)
+  - cat_features passed as integer index list to Pool
+  - CAT_PARAMS: iterations=10000, depth=7, l2_leaf_reg=3.0, rsm=0.8, subsample=0.8,
+    od_type="Iter", od_wait=100, allow_writing_files=False
+  - All feature engineering, OOF encoding, and multiplier tuning unchanged from attempt-8
+
+Result:
+  Tuned accuracy 0.72668 — FAIL (-0.00259 vs attempt-5 best of 0.72927).
+  CatBoost predicts ZERO class-1 rows: even after scaling class-1 down to c1×0.400
+  (the floor of the coarse search range), class-1 never wins argmax. The model
+  collapsed to effectively binary (class-0 vs class-2), identical to the pre-weight
+  baseline pattern.
+  All 5 folds converged in just 207–225 iterations (vs LightGBM attempt-8's 3477–4865),
+  indicating depth=7 with these settings hit capacity far too early. CatBoost is a
+  shallower, less expressive model here — the same story as XGBoost in attempt-6:
+  alternative models handle zip.code (400+ values, dominant feature) less effectively
+  than LightGBM's native categorical splits.
+
+Confusion matrix:
+true \ pred    0        1        2
+0              708341   0        32648
+1              75271    0        96
+2              177634   0        51133
+Per-class recall: class-0: 95.6%,  class-1: 0.0%,  class-2: 22.4%
+Verdict: FAIL — 0.72668 tuned (-0.00259 vs prior best 0.72927, attempt-5)
+Next attempt should try: Return to LightGBM. Try is_first_year_with_claim and
+  zip_frequency (both in open ideas) — these are cheap features with real signal
+  that haven't been tested yet. CatBoost and XGBoost are both confirmed inferior.
+
+---
+
+## attempt-9: Optuna hyperparameter search (tune_params.py only) — FAIL (tuning)
+
+Branch: improve/attempt-9
+Date: 2026-05-11
+Runtime: [tune_params.py only — no full 5-fold train_model.py run]
+CV accuracy: 0.72621 (3-fold, 350k subsample, tuned) — tune_params.py result only
+Std across folds: [not recorded]
+Naive baseline: 0.70900
+Hypothesis: The hyperparameters (num_leaves, learning_rate, lambda_l1/l2,
+  min_data_in_leaf) haven't been tuned since the 300k baseline. Running 40 Optuna
+  trials on a 350k subsample with the full attempt-8 feature pipeline should find
+  better parameters without the 60-minute full-run cost.
+Changes vs attempt-8:
+  - tune_params.py rewritten with full attempt-8 feature pipeline (all helpers,
+    nested OOF encoding, 56 features, 2-stage multiplier search as objective)
+  - SAMPLE_N=350k, N_FOLDS=3, N_TRIALS=40
+  - feature_pre_filter: False, zero_as_missing: False added to prevent unfair
+    between-trial comparisons from inconsistent feature filtering
+  - train_model.py NOT updated (attempt-9 did not produce a usable full-run result)
+
+Result:
+  Optuna's best trial reached 0.72621 tuned accuracy on 350k/3-fold.
+  All top-5 trials had c1 multiplier at exactly 0.300 — the hard floor of the
+  fine-search range (coarse range starts at 0.40, fine extends ±0.10, floor = 0.30).
+  The optimal c1 multiplier is below 0.30, meaning the Optuna params cause the model
+  to massively over-predict class-1 relative to accuracy-optimal. Root cause: class
+  weights {0:1.0, 1:1.3, 2:1.1} are active during tuning, distorting calibration in
+  a direction the multiplier search can't fully compensate for within its range.
+  Decision: params not adopted. train_model.py kept at attempt-8 hyperparameters.
+
+Confusion matrix: [not applicable — tune_params.py only]
+Per-class recall: [not applicable]
+Verdict: FAIL (tuning) — c1 multiplier hit search floor at 0.300; params not adopted.
+  If re-running Optuna: disable class weights during tuning to get unbiased probability
+  calibration, then re-enable weights in train_model.py.
+
+---
+
 ## attempt-8: lighter weights, nested OOF, 4 new OOF features — MIXED
 
 Branch: improve/attempt-8
