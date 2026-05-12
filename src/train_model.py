@@ -68,6 +68,7 @@ CAT_PARAMS = {
     "od_wait": 100,
     "verbose": 100,
     "thread_count": -1,
+    "allow_writing_files": False,
 }
 
 AGE_BINS = [-np.inf, 25, 35, 50, 65, np.inf]
@@ -301,8 +302,8 @@ def main():
     cat_cols = X.select_dtypes(include=["object", "string"]).columns.tolist()
     log(f"Categorical columns: {cat_cols}", t0)
     for c in cat_cols:
-        X[c] = X[c].astype(object).fillna("missing")
-        X_test[c] = X_test[c].astype(object).fillna("missing")
+        X[c] = X[c].astype("string").fillna("missing").astype(str)
+        X_test[c] = X_test[c].astype("string").fillna("missing").astype(str)
 
     # OOF placeholder columns (filled per fold inside the loop — no leakage)
     OOF_COLS = [
