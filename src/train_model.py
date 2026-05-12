@@ -185,6 +185,19 @@ def add_group_features(df: pd.DataFrame, ref: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def align_categoricals(
+    X: pd.DataFrame, X_test: pd.DataFrame, cat_cols: list[str]
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    for c in cat_cols:
+        combined = pd.concat(
+            [X[c].astype("string"), X_test[c].astype("string")], ignore_index=True
+        )
+        cats = combined.astype("category").cat.categories
+        X[c] = pd.Categorical(X[c].astype("string"), categories=cats)
+        X_test[c] = pd.Categorical(X_test[c].astype("string"), categories=cats)
+    return X, X_test
+
+
 def make_age_credit_key(df_sub: pd.DataFrame) -> pd.Series:
     """Combine age bucket and credit tier into a group key for OOF encoding."""
     age = df_sub["ni.age"]
@@ -343,14 +356,11 @@ def main():
     zip_keys_train = X["zip.code"].astype(str).reset_index(drop=True)
     zip_keys_test = X_test["zip.code"].astype(str).reset_index(drop=True)
 
-    # Convert categorical columns to plain Python strings.
-    # String dtype works for both LightGBM (categorical_feature=cat_cols)
-    # and CatBoost (cat_features=cat_feature_indices via Pool).
+    # LightGBM requires pandas Categorical dtype for categorical columns.
+    # align_categoricals unifies train/test categories so LightGBM sees the same encoding.
     cat_cols = X.select_dtypes(include=["object", "string"]).columns.tolist()
     log(f"Categorical columns: {cat_cols}", t0)
-    for c in cat_cols:
-        X[c] = X[c].astype("string").fillna("missing").astype(str)
-        X_test[c] = X_test[c].astype("string").fillna("missing").astype(str)
+    X, X_test = align_categoricals(X, X_test, cat_cols)
 
     # OOF placeholder columns (filled per fold inside the loop — no leakage)
     OOF_COLS = [
@@ -364,10 +374,6 @@ def main():
         X_test[col] = np.nan
 
     log(f"Total features: {X.shape[1]}", t0)
-
-    # cat_feature_indices for CatBoost Pool (built after all columns exist)
-    col_list = X.columns.tolist()
-    cat_feature_indices = [col_list.index(c) for c in cat_cols]
 
     # Guarantee positional RangeIndex so .loc[tr_idx/va_idx] is unambiguous
     X = X.reset_index(drop=True)
@@ -474,14 +480,23 @@ def main():
         lgb_fold_scores.append(lgb_fold_acc)
         log(f"  Fold {fold + 1} LGB  accuracy: {lgb_fold_acc:.5f}  (best iter: {lgb_model.best_iteration})", t0)
 
-        # --- CatBoost ---
-        train_pool = Pool(X_tr, y_tr, weight=sample_weights_tr, cat_features=cat_feature_indices)
-        val_pool = Pool(X_va, y_va, cat_features=cat_feature_indices)
+        # --- CatBoost (needs plain strings, not Categorical dtype) ---
+        X_tr_cat = X_tr.copy()
+        X_va_cat = X_va.copy()
+        X_test_cat = X_test_fold.copy()
+        for c in cat_cols:
+            X_tr_cat[c] = X_tr_cat[c].astype("string").fillna("missing").astype(str)
+            X_va_cat[c] = X_va_cat[c].astype("string").fillna("missing").astype(str)
+            X_test_cat[c] = X_test_cat[c].astype("string").fillna("missing").astype(str)
+        cat_feature_indices = [X_tr_cat.columns.get_loc(c) for c in cat_cols]
+
+        train_pool = Pool(X_tr_cat, y_tr, weight=sample_weights_tr, cat_features=cat_feature_indices)
+        val_pool = Pool(X_va_cat, y_va, cat_features=cat_feature_indices)
         cat_model = CatBoostClassifier(**CAT_PARAMS)
         cat_model.fit(train_pool, eval_set=val_pool)
         cat_va_pred = cat_model.predict_proba(val_pool)
         cat_oof_preds[va_idx] = cat_va_pred
-        test_pool_fold = Pool(X_test_fold, cat_features=cat_feature_indices)
+        test_pool_fold = Pool(X_test_cat, cat_features=cat_feature_indices)
         cat_test_preds += cat_model.predict_proba(test_pool_fold) / N_FOLDS
         cat_fold_acc = accuracy_score(y_va, cat_va_pred.argmax(axis=1))
         cat_fold_scores.append(cat_fold_acc)
