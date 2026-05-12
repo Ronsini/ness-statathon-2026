@@ -1,6 +1,6 @@
 """
 NESS Statathon 2026 — Policy Retention Model
-Training pipeline: 5-fold stratified CV with LightGBM on the full 1M-row dataset.
+Training pipeline: 5-fold stratified CV, LightGBM + CatBoost blend.
 
 Outputs:
   - output/submission.csv        Kaggle submission file
@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
+from catboost import CatBoostClassifier, Pool
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import StratifiedKFold
 
@@ -36,25 +37,20 @@ RANDOM_STATE = 42
 N_ROUNDS = 10000
 EARLY_STOPPING = 100
 
-ATTEMPT_LABEL = "improve/attempt-8"
+ATTEMPT_LABEL = "improve/attempt-11-lgb-cat-blend"
 ATTEMPT_NOTES = """
-Changes vs attempt-7:
-  - Lighter class weights: {0:1.0, 1:1.3, 2:1.1} (was {0:1.0, 1:2.0, 2:1.5})
-    Heavy weights sacrificed 6.5pp class-0 recall for only 4.6pp recovery in
-    classes 1+2. Lighter weights let threshold tuning do more of the work.
-  - Fixed fold-specific test OOF encoding bug: previously X_test OOF cols used
-    a running average of maps from folds 0..k when fold k predicted on test.
-    Now each fold builds X_test_fold = X_test.copy() with that fold's maps,
-    so fold k's model predicts on test encoded with fold k's map only.
-  - 4 new OOF target-encoded features (in addition to zip + age_credit from attempt-7):
-      zip_sales_cancel2_rate  / zip_sales_cancel1_rate   (zip x sales channel)
-      cov_dwell_cancel2_rate  / cov_dwell_cancel1_rate   (coverage x dwelling)
-  - Two-stage multiplier search: coarse (step 0.05, full range) then fine
-    (step 0.01, +-0.10 around coarse best) for higher-precision tuning.
-  - Retained from attempt-7: 6 missingness flags + age_credit OOF features.
-  - Training-fold target encodings are now nested OOF encodings: each outer
-    training fold is split into inner folds so training rows are encoded with
-    rates computed from other inner-fold rows, not their own labels.
+Changes vs attempt-8:
+  - Added CatBoostClassifier trained in parallel with LightGBM inside each fold.
+    Separate OOF and test probability arrays collected for each model.
+  - Post-CV blend search: LGB weight w in [0.70, 1.00] step 0.05,
+    CatBoost weight = 1 - w. For each w, run 2-stage multiplier search
+    (coarse c1/c2 in [0.40, 2.00] step 0.05, fine step 0.01 +-0.10).
+    Best (w, c1, c2) combination chosen by OOF accuracy.
+  - align_categoricals replaced with string conversion
+    (astype("string").fillna("missing").astype(str)) — works for both models.
+  - cat_feature_indices (integer list) built for CatBoost Pool.
+  - LGB_PARAMS, CLASS_WEIGHTS, and all feature engineering unchanged from attempt-8.
+  - CAT_PARAMS: same as attempt-10 (depth=7, learning_rate=0.02, od_wait=100).
 """
 
 # Lighter weights: class-0 recall matters more than class-1/2 recall
@@ -75,6 +71,27 @@ LGB_PARAMS = {
     "lambda_l2": 1.0,
     "verbose": -1,
     "n_jobs": -1,
+}
+
+CAT_PARAMS = {
+    "loss_function": "MultiClass",
+    "classes_count": 3,
+    "eval_metric": "Accuracy",
+    "iterations": 10000,
+    "learning_rate": 0.02,
+    "depth": 7,
+    "min_child_samples": 30,
+    "l2_leaf_reg": 3.0,
+    "rsm": 0.8,
+    "bootstrap_type": "Bernoulli",
+    "subsample": 0.8,
+    "random_seed": RANDOM_STATE,
+    "use_best_model": True,
+    "od_type": "Iter",
+    "od_wait": 100,
+    "verbose": 100,
+    "thread_count": -1,
+    "allow_writing_files": False,
 }
 
 AGE_BINS = [-np.inf, 25, 35, 50, 65, np.inf]
@@ -130,8 +147,8 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     df["coverage_type_missing"] = df["coverage.type"].isna().astype(int)
     df["ni_marital_status_missing"] = df["ni.marital.status"].isna().astype(int)
     df["n_children_missing"] = df["n.children"].isna().astype(int)
-    # Convert zip.code to string so LightGBM treats it as categorical (nominal),
-    # not numeric. Must happen after add_group_features (which merges on float zip).
+    # Convert zip.code to string so it's treated as categorical (nominal), not numeric.
+    # Must happen after add_group_features (which merges on float zip).
     df["zip.code"] = df["zip.code"].astype("string")
     return df
 
@@ -166,19 +183,6 @@ def add_group_features(df: pd.DataFrame, ref: pd.DataFrame) -> pd.DataFrame:
     df = df.drop(columns=["_dwell_prem_med"])
 
     return df
-
-
-def align_categoricals(
-    X: pd.DataFrame, X_test: pd.DataFrame, cat_cols: list[str]
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    for c in cat_cols:
-        combined = pd.concat(
-            [X[c].astype("string"), X_test[c].astype("string")], ignore_index=True
-        )
-        cats = combined.astype("category").cat.categories
-        X[c] = pd.Categorical(X[c].astype("string"), categories=cats)
-        X_test[c] = pd.Categorical(X_test[c].astype("string"), categories=cats)
-    return X, X_test
 
 
 def make_age_credit_key(df_sub: pd.DataFrame) -> pd.Series:
@@ -277,6 +281,29 @@ def fill_rate_columns(
     X_target.loc[row_idx, "cov_dwell_cancel1_rate"] = cov_dwell_keys.iloc[row_idx].map(cd_map1).fillna(cd_gz1).values
 
 
+def tune_multipliers(oof_probs: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
+    """Two-stage grid search for c1/c2 multipliers. Returns (c1, c2, best_acc)."""
+    best_acc = accuracy_score(y, oof_probs.argmax(axis=1))
+    best_c1, best_c2 = 1.0, 1.0
+
+    for t1, t2 in product(np.arange(0.40, 2.01, 0.05), np.arange(0.40, 2.01, 0.05)):
+        acc = accuracy_score(y, (oof_probs * np.array([1.0, t1, t2])).argmax(axis=1))
+        if acc > best_acc:
+            best_acc, best_c1, best_c2 = acc, t1, t2
+
+    t1_lo = max(0.01, best_c1 - 0.10)
+    t1_hi = min(3.00, best_c1 + 0.11)
+    t2_lo = max(0.01, best_c2 - 0.10)
+    t2_hi = min(3.00, best_c2 + 0.11)
+
+    for t1, t2 in product(np.arange(t1_lo, t1_hi, 0.01), np.arange(t2_lo, t2_hi, 0.01)):
+        acc = accuracy_score(y, (oof_probs * np.array([1.0, t1, t2])).argmax(axis=1))
+        if acc > best_acc:
+            best_acc, best_c1, best_c2 = acc, t1, t2
+
+    return best_c1, best_c2, best_acc
+
+
 # -----------------------------------------------------------------------------
 # Main pipeline
 # -----------------------------------------------------------------------------
@@ -316,10 +343,14 @@ def main():
     zip_keys_train = X["zip.code"].astype(str).reset_index(drop=True)
     zip_keys_test = X_test["zip.code"].astype(str).reset_index(drop=True)
 
-    # Align categoricals
+    # Convert categorical columns to plain Python strings.
+    # String dtype works for both LightGBM (categorical_feature=cat_cols)
+    # and CatBoost (cat_features=cat_feature_indices via Pool).
     cat_cols = X.select_dtypes(include=["object", "string"]).columns.tolist()
     log(f"Categorical columns: {cat_cols}", t0)
-    X, X_test = align_categoricals(X, X_test, cat_cols)
+    for c in cat_cols:
+        X[c] = X[c].astype("string").fillna("missing").astype(str)
+        X_test[c] = X_test[c].astype("string").fillna("missing").astype(str)
 
     # OOF placeholder columns (filled per fold inside the loop — no leakage)
     OOF_COLS = [
@@ -330,9 +361,13 @@ def main():
     ]
     for col in OOF_COLS:
         X[col] = np.nan
-        X_test[col] = np.nan  # placeholder; overwritten per fold in X_test_fold
+        X_test[col] = np.nan
 
     log(f"Total features: {X.shape[1]}", t0)
+
+    # cat_feature_indices for CatBoost Pool (built after all columns exist)
+    col_list = X.columns.tolist()
+    cat_feature_indices = [col_list.index(c) for c in cat_cols]
 
     # Guarantee positional RangeIndex so .loc[tr_idx/va_idx] is unambiguous
     X = X.reset_index(drop=True)
@@ -347,20 +382,22 @@ def main():
     zip_keys_train = zip_keys_train.reset_index(drop=True)
     zip_keys_test = zip_keys_test.reset_index(drop=True)
 
-    # 5-fold stratified CV
-    skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
-    oof_preds = np.zeros((len(X), 3))
-    test_preds = np.zeros((len(X_test), 3))
-    fold_scores = []
+    # Separate OOF and test prediction arrays for each model
+    lgb_oof_preds = np.zeros((len(X), 3))
+    cat_oof_preds = np.zeros((len(X), 3))
+    lgb_test_preds = np.zeros((len(X_test), 3))
+    cat_test_preds = np.zeros((len(X_test), 3))
+    lgb_fold_scores = []
+    cat_fold_scores = []
 
+    skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
     smooth_k = 20
 
     for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y)):
         log(f"Fold {fold + 1}/{N_FOLDS}...", t0)
         y_tr, y_va = y[tr_idx], y[va_idx]
 
-        # Step 1: Fill training rows via nested OOF — each training row is encoded
-        # using rates from the other inner-fold rows, not its own label.
+        # Nested OOF encoding for training rows (no leakage into own labels)
         inner_skf = StratifiedKFold(
             n_splits=N_FOLDS,
             shuffle=True,
@@ -370,17 +407,14 @@ def main():
             inner_tr_idx = tr_idx[inner_tr_pos]
             inner_va_idx = tr_idx[inner_va_pos]
             inner_maps = build_encoding_maps(
-                X_source=X,
-                row_idx=inner_tr_idx,
-                y_source=y,
+                X_source=X, row_idx=inner_tr_idx, y_source=y,
                 age_credit_keys=age_credit_keys_train,
                 zip_sales_keys=zip_sales_keys_train,
                 cov_dwell_keys=cov_dwell_keys_train,
                 smooth_k=smooth_k,
             )
             fill_rate_columns(
-                X_target=X,
-                row_idx=inner_va_idx,
+                X_target=X, row_idx=inner_va_idx,
                 zip_keys=zip_keys_train,
                 age_credit_keys=age_credit_keys_train,
                 zip_sales_keys=zip_sales_keys_train,
@@ -388,21 +422,16 @@ def main():
                 maps=inner_maps,
             )
 
-        # Step 2: Build outer maps from the full outer training fold
+        # Outer maps from full outer training fold (for val rows and test)
         outer_maps = build_encoding_maps(
-            X_source=X,
-            row_idx=tr_idx,
-            y_source=y,
+            X_source=X, row_idx=tr_idx, y_source=y,
             age_credit_keys=age_credit_keys_train,
             zip_sales_keys=zip_sales_keys_train,
             cov_dwell_keys=cov_dwell_keys_train,
             smooth_k=smooth_k,
         )
-
-        # Step 3: Fill validation rows using outer maps only (no leakage)
         fill_rate_columns(
-            X_target=X,
-            row_idx=va_idx,
+            X_target=X, row_idx=va_idx,
             zip_keys=zip_keys_train,
             age_credit_keys=age_credit_keys_train,
             zip_sales_keys=zip_sales_keys_train,
@@ -410,13 +439,12 @@ def main():
             maps=outer_maps,
         )
 
-        # Step 4: Build fold-specific test copy using outer maps
+        # Fold-specific test copy using outer maps
         X_test_fold = X_test.copy()
         zip_map2, zip_map1, gz2, gz1 = outer_maps["zip"]
         ac_map2, ac_map1, ac_gz2, ac_gz1 = outer_maps["age_credit"]
         zs_map2, zs_map1, zs_gz2, zs_gz1 = outer_maps["zip_sales"]
         cd_map2, cd_map1, cd_gz2, cd_gz1 = outer_maps["cov_dwell"]
-
         X_test_fold["zip_cancel2_rate"] = zip_keys_test.map(zip_map2).fillna(gz2).values
         X_test_fold["zip_cancel1_rate"] = zip_keys_test.map(zip_map1).fillna(gz1).values
         X_test_fold["age_credit_cancel2_rate"] = age_credit_keys_test.map(ac_map2).fillna(ac_gz2).values
@@ -426,88 +454,86 @@ def main():
         X_test_fold["cov_dwell_cancel2_rate"] = cov_dwell_keys_test.map(cd_map2).fillna(cd_gz2).values
         X_test_fold["cov_dwell_cancel1_rate"] = cov_dwell_keys_test.map(cd_map1).fillna(cd_gz1).values
 
-        # Step 5: Train LightGBM
         X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
-
         sample_weights_tr = np.array([CLASS_WEIGHTS[yi] for yi in y_tr])
 
+        # --- LightGBM ---
         dtr = lgb.Dataset(X_tr, y_tr, weight=sample_weights_tr, categorical_feature=cat_cols)
         dva = lgb.Dataset(X_va, y_va, categorical_feature=cat_cols, reference=dtr)
-
-        model = lgb.train(
+        lgb_model = lgb.train(
             LGB_PARAMS,
             dtr,
             num_boost_round=N_ROUNDS,
             valid_sets=[dva],
             callbacks=[lgb.early_stopping(EARLY_STOPPING), lgb.log_evaluation(100)],
         )
+        lgb_va_pred = lgb_model.predict(X_va, num_iteration=lgb_model.best_iteration)
+        lgb_oof_preds[va_idx] = lgb_va_pred
+        lgb_test_preds += lgb_model.predict(X_test_fold, num_iteration=lgb_model.best_iteration) / N_FOLDS
+        lgb_fold_acc = accuracy_score(y_va, lgb_va_pred.argmax(axis=1))
+        lgb_fold_scores.append(lgb_fold_acc)
+        log(f"  Fold {fold + 1} LGB  accuracy: {lgb_fold_acc:.5f}  (best iter: {lgb_model.best_iteration})", t0)
 
-        # Steps 6 & 7: Predict on validation and test
-        va_pred = model.predict(X_va, num_iteration=model.best_iteration)
-        oof_preds[va_idx] = va_pred
-        test_preds += model.predict(X_test_fold, num_iteration=model.best_iteration) / N_FOLDS
+        # --- CatBoost ---
+        train_pool = Pool(X_tr, y_tr, weight=sample_weights_tr, cat_features=cat_feature_indices)
+        val_pool = Pool(X_va, y_va, cat_features=cat_feature_indices)
+        cat_model = CatBoostClassifier(**CAT_PARAMS)
+        cat_model.fit(train_pool, eval_set=val_pool)
+        cat_va_pred = cat_model.predict_proba(val_pool)
+        cat_oof_preds[va_idx] = cat_va_pred
+        test_pool_fold = Pool(X_test_fold, cat_features=cat_feature_indices)
+        cat_test_preds += cat_model.predict_proba(test_pool_fold) / N_FOLDS
+        cat_fold_acc = accuracy_score(y_va, cat_va_pred.argmax(axis=1))
+        cat_fold_scores.append(cat_fold_acc)
+        log(f"  Fold {fold + 1} CAT  accuracy: {cat_fold_acc:.5f}  (best iter: {cat_model.best_iteration_})", t0)
 
-        fold_acc = accuracy_score(y_va, va_pred.argmax(axis=1))
-        fold_scores.append(fold_acc)
-        log(f"  Fold {fold + 1} accuracy: {fold_acc:.5f}  (best iter: {model.best_iteration})", t0)
+    # Individual model raw OOF
+    lgb_raw_acc = accuracy_score(y, lgb_oof_preds.argmax(axis=1))
+    cat_raw_acc = accuracy_score(y, cat_oof_preds.argmax(axis=1))
+    log(f"LGB raw OOF accuracy:     {lgb_raw_acc:.5f}", t0)
+    log(f"CatBoost raw OOF accuracy: {cat_raw_acc:.5f}", t0)
 
-    # Post-hoc threshold tuning — two-stage grid search on OOF predictions
-    raw_acc = accuracy_score(y, oof_preds.argmax(axis=1))
-    log(f"Raw OOF accuracy (argmax): {raw_acc:.5f}", t0)
+    # Blend + multiplier search
+    print("\nBlend + multiplier search (LGB weight 0.70 → 1.00)...")
+    best_blend_acc = -1.0
+    best_w = 1.0
+    best_c1 = 1.0
+    best_c2 = 1.0
 
-    print("\nTuning multipliers — stage 1: coarse grid (step 0.05, range 0.40-2.00)...")
-    best_acc = raw_acc
-    best_mult = (1.0, 1.0, 1.0)
+    for w in np.arange(0.70, 1.01, 0.05):
+        blend_oof = w * lgb_oof_preds + (1.0 - w) * cat_oof_preds
+        c1, c2, acc = tune_multipliers(blend_oof, y)
+        print(f"  w(LGB)={w:.2f}: acc={acc:.5f}  c1x{c1:.3f}  c2x{c2:.3f}")
+        if acc > best_blend_acc:
+            best_blend_acc = acc
+            best_w = w
+            best_c1, best_c2 = c1, c2
 
-    for t1, t2 in product(
-        np.arange(0.40, 2.01, 0.05),
-        np.arange(0.40, 2.01, 0.05),
-    ):
-        adjusted = oof_preds * np.array([1.0, t1, t2])
-        acc = accuracy_score(y, adjusted.argmax(axis=1))
-        if acc > best_acc:
-            best_acc = acc
-            best_mult = (1.0, t1, t2)
+    print(f"\nBest blend:      LGB={best_w:.2f}  CatBoost={1.0 - best_w:.2f}")
+    print(f"Best multipliers: c0x1.00  c1x{best_c1:.3f}  c2x{best_c2:.3f}")
+    print(f"Best tuned OOF accuracy: {best_blend_acc:.5f}")
 
-    coarse_t1, coarse_t2 = best_mult[1], best_mult[2]
-    print(f"  Coarse best: c1x{coarse_t1:.2f}, c2x{coarse_t2:.2f}  acc={best_acc:.5f}")
-
-    print("Tuning multipliers — stage 2: fine grid (step 0.01, +-0.10 around coarse best)...")
-    t1_lo = max(0.01, coarse_t1 - 0.10)
-    t1_hi = min(3.00, coarse_t1 + 0.11)
-    t2_lo = max(0.01, coarse_t2 - 0.10)
-    t2_hi = min(3.00, coarse_t2 + 0.11)
-
-    for t1, t2 in product(
-        np.arange(t1_lo, t1_hi, 0.01),
-        np.arange(t2_lo, t2_hi, 0.01),
-    ):
-        adjusted = oof_preds * np.array([1.0, t1, t2])
-        acc = accuracy_score(y, adjusted.argmax(axis=1))
-        if acc > best_acc:
-            best_acc = acc
-            best_mult = (1.0, t1, t2)
-
-    print(f"  Fine best: c1x{best_mult[1]:.3f}, c2x{best_mult[2]:.3f}  acc={best_acc:.5f}")
-    print(f"Best multipliers: class0x{best_mult[0]:.2f}, "
-          f"class1x{best_mult[1]:.3f}, class2x{best_mult[2]:.3f}")
-    print(f"Tuned OOF accuracy: {best_acc:.5f} (was {raw_acc:.5f})")
-
-    multipliers_arr = np.array(best_mult)
-    oof_class = (oof_preds * multipliers_arr).argmax(axis=1)
-    test_class = (test_preds * multipliers_arr).argmax(axis=1)
+    # Apply best blend to produce final predictions
+    blend_oof_final = best_w * lgb_oof_preds + (1.0 - best_w) * cat_oof_preds
+    blend_test_final = best_w * lgb_test_preds + (1.0 - best_w) * cat_test_preds
+    mult_arr = np.array([1.0, best_c1, best_c2])
+    oof_class = (blend_oof_final * mult_arr).argmax(axis=1)
+    test_class = (blend_test_final * mult_arr).argmax(axis=1)
 
     overall_acc = accuracy_score(y, oof_class)
     cm = confusion_matrix(y, oof_class)
+    test_dist = pd.Series(test_class).value_counts().sort_index()
 
     summary = []
     summary.append("=" * 60)
-    summary.append(f"5-fold CV accuracy (mean): {np.mean(fold_scores):.5f}")
-    summary.append(f"5-fold CV accuracy (std):  {np.std(fold_scores):.5f}")
-    summary.append(f"OOF accuracy (raw argmax): {raw_acc:.5f}")
-    summary.append(f"OOF accuracy (tuned):      {overall_acc:.5f}")
-    summary.append(f"Multipliers: c0x{best_mult[0]:.2f}  c1x{best_mult[1]:.3f}  c2x{best_mult[2]:.3f}")
-    summary.append(f"Naive baseline (all 0):    {(y == 0).mean():.5f}")
+    summary.append(f"LGB  5-fold CV (mean): {np.mean(lgb_fold_scores):.5f}  std: {np.std(lgb_fold_scores):.5f}")
+    summary.append(f"CAT  5-fold CV (mean): {np.mean(cat_fold_scores):.5f}  std: {np.std(cat_fold_scores):.5f}")
+    summary.append(f"LGB  raw OOF accuracy: {lgb_raw_acc:.5f}")
+    summary.append(f"CAT  raw OOF accuracy: {cat_raw_acc:.5f}")
+    summary.append(f"Best blend:            LGB={best_w:.2f}  CatBoost={1.0 - best_w:.2f}")
+    summary.append(f"OOF accuracy (tuned):  {overall_acc:.5f}")
+    summary.append(f"Multipliers: c0x1.00  c1x{best_c1:.3f}  c2x{best_c2:.3f}")
+    summary.append(f"Naive baseline (all 0): {(y == 0).mean():.5f}")
     summary.append("=" * 60)
     summary.append("\nConfusion matrix (rows=true, cols=pred):")
     summary.append(
@@ -519,6 +545,10 @@ def main():
             )
         )
     )
+    summary.append("\nTest prediction distribution:")
+    for cls in range(3):
+        cnt = test_dist.get(cls, 0)
+        summary.append(f"  class {cls}: {cnt:,} ({cnt / len(test_class) * 100:.1f}%)")
     print("\n" + "\n".join(summary))
 
     (OUTPUT_DIR / "cv_results.txt").write_text("\n".join(summary))
