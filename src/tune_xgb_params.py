@@ -267,6 +267,9 @@ def make_objective(X, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_ke
             "max_bin": trial.suggest_categorical("max_bin", [128, 256, 512]),
         }
 
+        for col in OOF_COLS:
+            X[col] = np.nan
+
         skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
         oof_preds = np.zeros((len(X), 3))
 
