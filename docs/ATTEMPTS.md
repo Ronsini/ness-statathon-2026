@@ -2,6 +2,49 @@
 
 ---
 
+## attempt-15: XGBoost learning_rate 0.03→0.02, n_estimators 10000→15000 — MIXED
+
+Branch: improve/attempt-15-xgb-lr002-15000
+Date: 2026-05-13
+Runtime: 4812s
+CV accuracy: 0.73430 (raw) → 0.73644 (tuned)
+Public leaderboard: not submitted
+Std across folds: 0.00008
+Naive baseline: 0.70900
+Hypothesis: Attempt-14 converged naturally at 6643–7737 rounds. A lower learning rate
+  (0.02) with a higher cap (15000) might take smaller steps near the minimum and find
+  a slightly better solution. This is not a guaranteed improvement — the model already
+  converged properly in attempt-14.
+Changes vs attempt-14:
+  - learning_rate: 0.03 → 0.02
+  - n_estimators: 10000 → 15000
+
+Result:
+  Tuned accuracy 0.73644 — MIXED (-0.00017 vs attempt-14's 0.73661). Lower learning
+  rate did not find a better minimum. Final logloss values are marginally worse than
+  attempt-14 despite more rounds (fold best iters: 10024, 10570, 10152, 9657, 10177).
+  Fold stability improved dramatically: std 0.00035 → 0.00008, the tightest across
+  any attempt. Class-1 recall ticked up: 54.3% → 55.9% (+1.6pp), but class-2 dropped
+  (-0.4pp: 24.2% → 23.8%), producing a net CV loss. Multipliers shifted slightly:
+  c1×1.300, c2×0.880 (was c1×1.260, c2×0.890).
+  Conclusion: lr=0.03 is the better setting for this dataset. The lr=0.02 path is a
+  dead end; do not go lower.
+
+Confusion matrix:
+true \ pred    0         1         2
+0              673045    30851     37093
+1              32861     42155     351
+2              157365    16928     54474
+Per-class recall: class-0: 90.8%,  class-1: 55.9%,  class-2: 23.8%
+Verdict: MIXED — 0.73644 tuned (-0.00017 vs attempt-14 best of 0.73661).
+  lr=0.03 is the confirmed better setting; do not go lower.
+Next attempt should try: Optuna hyperparameter search on XGBoost. The controlled
+  learning-rate test is complete — lr=0.03, n_estimators=10000 is the optimal
+  setting for these params. Optuna on a subsample (300k rows, 3 folds) to search
+  max_depth, min_child_weight, subsample, colsample_bytree, reg_lambda, reg_alpha.
+
+---
+
 ## attempt-14: XGBoost n_estimators 5000 → 10000 — PASS
 
 Branch: improve/attempt-14-xgb-10000-rounds

@@ -91,10 +91,10 @@ attempt-1:  PASS  baseline — LightGBM on 300k subsample (0.72570)
 
 ## Open ideas (untried)
 
-- Optuna hyperparameter search on XGBoost using the current 91-feature pipeline.
-  Params not tuned since attempt-9 (which used LightGBM). Highest-expected-gain lever.
-  Key params to search: learning_rate, max_depth, min_child_weight, subsample,
-  colsample_bytree, reg_lambda, reg_alpha.
+- Optuna hyperparameter search on XGBoost using a 300k subsample + 3 folds for speed,
+  then run best params on full 5-fold CV. Key params: max_depth, min_child_weight,
+  subsample, colsample_bytree, reg_lambda, reg_alpha. Keep lr=0.03 fixed (confirmed
+  best by attempt-15). Highest-expected-gain lever remaining.
 - LightGBM + XGBoost blend: attempt-8 LGB (public 0.74099) + attempt-14 XGB (public
   0.75623). If errors are orthogonal, a small LGB contribution might diversify.
 - Ordinal regression approach: two binary classifiers P(cancel≥1) and P(cancel≥2)
