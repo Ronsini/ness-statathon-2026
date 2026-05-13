@@ -2,6 +2,47 @@
 
 ---
 
+## attempt-14: XGBoost n_estimators 5000 → 10000 — PASS
+
+Branch: improve/attempt-14-xgb-10000-rounds
+Date: 2026-05-13
+Runtime: 3486s
+CV accuracy: 0.73426 (raw) → 0.73661 (tuned)
+Public leaderboard: 0.75623
+Std across folds: 0.00035
+Naive baseline: 0.70900
+Hypothesis: All 5 attempt-13 folds hit the 5000 estimator cap with logloss still
+  declining at round 4999. The model was undertrained. Raising n_estimators to 10000
+  with early_stopping_rounds=100 should let each fold converge naturally and recover
+  the remaining accuracy.
+Changes vs attempt-13:
+  - n_estimators: 5000 → 10000 (only change)
+
+Result:
+  Tuned accuracy 0.73661 — PASS (+0.00103 vs attempt-13's 0.73558, +0.00734 vs
+  all-time prior best 0.72927). Public 0.75623 is a new best (+0.00416 over attempt-13).
+  All folds converged naturally via early stopping (best iters: 7336, 7261, 6788, 7737,
+  6643) — none hit the 10000 cap. This confirms n_estimators=10000 is the right ceiling.
+  Class-1 recall improved further: 52.7% → 54.3% (+1.6pp). Class-0 and class-2 held
+  flat at 90.9% and 24.2%. Optimal multipliers identical to attempt-13 (c1×1.260, c2×0.890),
+  confirming the model calibration is stable across round counts.
+
+Confusion matrix:
+true \ pred    0         1         2
+0              673544    29368     38077
+1              34035     40922     410
+2              157347    16043     55377
+Per-class recall: class-0: 90.9%,  class-1: 54.3%,  class-2: 24.2%
+Verdict: PASS — 0.73661 tuned (+0.00103 vs attempt-13; +0.00734 vs prior all-time best).
+  New best CV and new best public (0.75623).
+Next attempt should try: Optuna hyperparameter search on XGBoost (learning_rate,
+  max_depth, min_child_weight, subsample, colsample_bytree, reg_lambda, reg_alpha)
+  using the current 91-feature pipeline. Parameters haven't been tuned since attempt-9
+  which used LightGBM. Alternatively, an LGB+XGB blend using attempt-8 and attempt-14
+  probabilities could add orthogonal signal.
+
+---
+
 ## attempt-13: pure XGBoost with clean numeric preprocessing — PASS
 
 Branch: improve/attempt-13-xgb-clean-preprocess
