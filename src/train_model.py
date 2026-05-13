@@ -35,25 +35,16 @@ SAMPLE_N = None  # None = full 1M rows; set an int to subsample for quick iterat
 N_FOLDS = 5
 RANDOM_STATE = 42
 
-ATTEMPT_LABEL = "improve/attempt-13-xgb-clean-preprocess"
+ATTEMPT_LABEL = "improve/attempt-14-xgb-10000-rounds"
 ATTEMPT_NOTES = """
-Changes vs attempt-8:
-  - Pure XGBoost (XGBClassifier) replacing LightGBM — no LightGBM or CatBoost
-  - Baseline is attempt-8 (best public score 0.74099)
-  - Clean numeric preprocessing for XGBoost:
-      * Count/frequency encoding for high-cardinality categoricals:
-        zip.code, house.color, email_domain
-      * One-hot encoding (pd.get_dummies, dummy_na=True) for low-cardinality:
-        credit, coverage.type, dwelling.type, ni.gender,
-        original_quote_weekday, season_of_renewal, sales.channel
-      * Remaining object/string/category columns dropped before XGBoost
-  - Added safe row-level features from attempt-12:
-      * is_first_year_with_claim: (tenure < 1.1) & (claim.ind == 1)
-      * len_at_res_missing, sales_channel_missing, tenure_missing,
-        premium_missing, square_footage_missing
-  - Kept all attempt-8 OOF target encodings (8 columns, nested OOF for train rows)
-  - Skipped profile OOF and zip_year OOF (attempt-12 showed they hurt public score)
-  - Class weights {0:1.0, 1:1.3, 2:1.1} and multiplier tuning unchanged from attempt-8
+Changes vs attempt-13:
+  - n_estimators: 5000 -> 10000 (only change)
+  - Baseline is attempt-13 (best public score 0.75207)
+  - All 5 folds in attempt-13 hit the 5000 estimator cap with validation logloss
+    still declining at round 4999 (final logloss: 0.592, 0.593, 0.593, 0.594, 0.592).
+    Clear sign of undertraining — raising to 10000 to test if more rounds help.
+  - Everything else unchanged: same preprocessing, OOF encodings, count/frequency
+    features, one-hot features, class weights, multiplier tuning, folds, random_state.
 """
 
 CLASS_WEIGHTS = {0: 1.0, 1: 1.3, 2: 1.1}
@@ -71,7 +62,7 @@ XGB_PARAMS = {
     "reg_alpha": 0.2,
     "tree_method": "hist",
     "max_bin": 256,
-    "n_estimators": 5000,
+    "n_estimators": 10000,
     "early_stopping_rounds": 100,
     "n_jobs": -1,
     "random_state": RANDOM_STATE,
