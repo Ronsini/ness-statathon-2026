@@ -42,7 +42,7 @@ Changes vs attempt-8:
   - Baseline is attempt-8 (best public score 0.74099)
   - Clean numeric preprocessing for XGBoost:
       * Count/frequency encoding for high-cardinality categoricals:
-        zip.code, house.color, email_domain, sales.channel
+        zip.code, house.color, email_domain
       * One-hot encoding (pd.get_dummies, dummy_na=True) for low-cardinality:
         credit, coverage.type, dwelling.type, ni.gender,
         original_quote_weekday, season_of_renewal, sales.channel
@@ -248,9 +248,9 @@ def compute_oof_rates(
 
 
 def build_encoding_maps(
-    X_source: pd.DataFrame,
     row_idx: np.ndarray,
     y_source: np.ndarray,
+    zip_keys: pd.Series,
     age_credit_keys: pd.Series,
     zip_sales_keys: pd.Series,
     cov_dwell_keys: pd.Series,
@@ -259,7 +259,7 @@ def build_encoding_maps(
     """Build all target-encoding maps using only the selected source rows."""
     y_part = y_source[row_idx]
     zip_maps = compute_oof_rates(
-        X_source.iloc[row_idx]["zip.code"].astype(str).reset_index(drop=True),
+        zip_keys.iloc[row_idx].reset_index(drop=True),
         y_part, smooth_k,
     )
     ac_maps = compute_oof_rates(
@@ -410,9 +410,9 @@ def main():
             inner_tr_idx = tr_idx[inner_tr_pos]
             inner_va_idx = tr_idx[inner_va_pos]
             inner_maps = build_encoding_maps(
-                X_source=X,
                 row_idx=inner_tr_idx,
                 y_source=y,
+                zip_keys=zip_keys_train,
                 age_credit_keys=age_credit_keys_train,
                 zip_sales_keys=zip_sales_keys_train,
                 cov_dwell_keys=cov_dwell_keys_train,
@@ -430,9 +430,9 @@ def main():
 
         # Step 2: Build outer maps from the full outer training fold
         outer_maps = build_encoding_maps(
-            X_source=X,
             row_idx=tr_idx,
             y_source=y,
+            zip_keys=zip_keys_train,
             age_credit_keys=age_credit_keys_train,
             zip_sales_keys=zip_sales_keys_train,
             cov_dwell_keys=cov_dwell_keys_train,
