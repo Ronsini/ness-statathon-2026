@@ -2,6 +2,66 @@
 
 ---
 
+## attempt-13: pure XGBoost with clean numeric preprocessing — PASS
+
+Branch: improve/attempt-13-xgb-clean-preprocess
+Date: 2026-05-13
+Runtime: 2277s
+CV accuracy: 0.73312 (raw) → 0.73558 (tuned)
+Public leaderboard: 0.75207
+Std across folds: 0.00034
+Naive baseline: 0.70900
+Hypothesis: Pure XGBoost with proper numeric preprocessing has never been tried.
+  Attempt-6 was a blend (not pure XGBoost) and had no preprocessing for high-cardinality
+  categoricals. With count/frequency encoding for zip.code, house.color, email_domain and
+  one-hot encoding for low-cardinality categoricals, XGBoost gets clean numeric input and
+  may handle the feature space differently than LightGBM — potentially surfacing signal
+  that LightGBM's native categorical splits miss, especially for class-1 (7% of data).
+Changes vs attempt-8:
+  - Model: LightGBM → pure XGBoost (XGBClassifier, multi:softprob)
+  - XGB_PARAMS: learning_rate=0.03, max_depth=7, min_child_weight=10,
+    subsample=0.85, colsample_bytree=0.85, reg_lambda=3.0, reg_alpha=0.2,
+    tree_method=hist, max_bin=256, n_estimators=5000, early_stopping_rounds=100
+  - Count/frequency encoding for high-cardinality categoricals:
+    zip.code, house.color, email_domain → {col}_count, {col}_freq
+  - One-hot encoding (pd.get_dummies, dummy_na=True) for low-cardinality categoricals:
+    credit, coverage.type, dwelling.type, ni.gender, original_quote_weekday,
+    season_of_renewal, sales.channel
+  - Remaining string/category columns dropped; X/X_test cast to float
+  - Added safe row-level features from attempt-12: is_first_year_with_claim,
+    len_at_res_missing, sales_channel_missing, tenure_missing,
+    premium_missing, square_footage_missing
+  - All 8 OOF target-encoded features and nested OOF structure retained from attempt-8
+  - 91 total features (was 56 in attempt-8)
+
+Result:
+  Tuned accuracy 0.73558 — PASS (+0.00631 vs prior best 0.72927, attempt-5).
+  Public score 0.75207 is the new best by a large margin (was 0.74099, attempt-8).
+  XGBoost dramatically improved class-1 recall: 35.9% → 52.7% (+16.8pp). This is the
+  key driver — the one-hot encoding gives XGBoost clean categorical boundaries for the
+  features that distinguish class-1, which LightGBM's native splits were underusing.
+  Class-0 recall dropped slightly (91.6% → 90.9%, -0.7pp) and class-2 held near flat
+  (24.8% → 24.2%, -0.6pp). The net gain is large because class-1 improvements are
+  nearly pure additions at modest class-0 cost.
+  All 5 folds hit the n_estimators=5000 cap (best iters: 4999, 4999, 4999, 4995, 4994)
+  — the model was still improving at round 5000. Raising n_estimators to 10000 for
+  attempt-14 should yield further gains.
+
+Confusion matrix:
+true \ pred    0         1         2
+0              673717    29878     37394
+1              35356     39755     256
+2              156902    16562     55303
+Per-class recall: class-0: 90.9%,  class-1: 52.7%,  class-2: 24.2%
+Verdict: PASS — 0.73558 tuned (+0.00631 vs prior best 0.72927, attempt-5).
+  New best CV and new best public (0.75207). Previous lesson that XGBoost is inferior
+  was wrong — it was based on attempt-6 which was a blend without proper preprocessing.
+Next attempt should try: Raise n_estimators to 10000 — all folds hit the 5000 cap,
+  logloss still declining at the last round. Pure XGBoost with more rounds is the
+  highest-expected-gain next step.
+
+---
+
 ## attempt-8: lighter weights, nested OOF, 4 new OOF features — MIXED
 
 Branch: improve/attempt-8
@@ -124,6 +184,7 @@ Branch: improve/attempt-5
 Date: 2026-05-09
 Runtime: [unknown]
 CV accuracy: [unknown raw] → 0.72927 (tuned)
+Public leaderboard: 0.73961
 Std across folds: [unknown]
 Naive baseline: 0.70900
 Hypothesis: Attempt-4 showed that class weights produce well-calibrated
