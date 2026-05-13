@@ -35,16 +35,17 @@ SAMPLE_N = None  # None = full 1M rows; set an int to subsample for quick iterat
 N_FOLDS = 5
 RANDOM_STATE = 42
 
-ATTEMPT_LABEL = "improve/attempt-14-xgb-10000-rounds"
+ATTEMPT_LABEL = "improve/attempt-15-xgb-lr002-15000"
 ATTEMPT_NOTES = """
-Changes vs attempt-13:
-  - n_estimators: 5000 -> 10000 (only change)
-  - Baseline is attempt-13 (best public score 0.75207)
-  - All 5 folds in attempt-13 hit the 5000 estimator cap with validation logloss
-    still declining at round 4999 (final logloss: 0.592, 0.593, 0.593, 0.594, 0.592).
-    Clear sign of undertraining — raising to 10000 to test if more rounds help.
-  - Everything else unchanged: same preprocessing, OOF encodings, count/frequency
-    features, one-hot features, class weights, multiplier tuning, folds, random_state.
+Changes vs attempt-14:
+  - learning_rate: 0.03 -> 0.02
+  - n_estimators: 10000 -> 15000
+  - Baseline is attempt-14 (best public score 0.75623)
+  - Attempt-14 converged naturally at 6643-7737 rounds (no cap hit), so lower lr
+    is not a guaranteed improvement the way the n_estimators raise was.
+  - Testing whether smoother gradient steps near convergence squeeze additional accuracy.
+    Lower lr may find a better local minimum; early stopping will cap at the right point.
+  - No feature or preprocessing changes.
 """
 
 CLASS_WEIGHTS = {0: 1.0, 1: 1.3, 2: 1.1}
@@ -53,7 +54,7 @@ XGB_PARAMS = {
     "objective": "multi:softprob",
     "num_class": 3,
     "eval_metric": "mlogloss",
-    "learning_rate": 0.03,
+    "learning_rate": 0.02,
     "max_depth": 7,
     "min_child_weight": 10,
     "subsample": 0.85,
@@ -62,7 +63,7 @@ XGB_PARAMS = {
     "reg_alpha": 0.2,
     "tree_method": "hist",
     "max_bin": 256,
-    "n_estimators": 10000,
+    "n_estimators": 15000,
     "early_stopping_rounds": 100,
     "n_jobs": -1,
     "random_state": RANDOM_STATE,
