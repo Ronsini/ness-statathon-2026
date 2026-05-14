@@ -2,6 +2,41 @@
 
 ---
 
+## attempt-18: save XGB + LGB probability arrays for blending — INFRASTRUCTURE
+
+Branch: improve/attempt-18-save-probs
+Date: 2026-05-14
+Runtime: 3638s (XGB) + 3332s (LGB)
+CV accuracy: 0.73661 (XGB, identical to attempt-14) / 0.72963 (LGB, identical to attempt-8)
+Public leaderboard: not submitted
+Hypothesis: Blending/stacking requires raw class probabilities, not just submission labels.
+  Re-run attempt-14 (XGB) and attempt-8 (LGB) pipelines unchanged to generate and save
+  probability arrays for use in attempt-19 soft blend and attempt-20 stacking.
+Changes vs attempt-14:
+  - Added np.save calls to train_model.py to write xgb_oof_probs.npy, xgb_test_probs.npy,
+    y_train.npy, test_ids.npy (no model or preprocessing changes)
+  - Created save_lgb_probs.py replicating the exact attempt-8 LGB pipeline, saving
+    lgb_oof_probs.npy and lgb_test_probs.npy
+
+Result:
+  Both runs reproduced their originals exactly. XGB: 0.73661 tuned, c1×1.260, c2×0.890,
+  fold convergence at 7336, 7261, 6788, 7737, 6643. LGB: 0.72963 tuned, c1×1.260,
+  c2×0.900, fold convergence at 3477, 4079, 3439, 4428, 4865. Probability arrays saved
+  to output/ and committed to the branch. Ready for attempt-19 blending.
+
+Outputs saved:
+  output/xgb_oof_probs.npy   (1,045,123 × 3)
+  output/xgb_test_probs.npy  (2,412 × 3)
+  output/lgb_oof_probs.npy   (1,045,123 × 3)
+  output/lgb_test_probs.npy  (2,412 × 3)
+  output/y_train.npy         (1,045,123,)
+  output/test_ids.npy        (2,412,)
+Verdict: Infrastructure run. No submission. Attempt-14 remains the best public score (0.75623).
+Next attempt should try: Soft blend attempt-19 — weighted average of XGB and LGB probabilities
+  (XGB 85–95%, LGB 5–15%) with multiplier tuning on OOF blend.
+
+---
+
 ## attempt-14: XGBoost n_estimators 5000 → 10000 — PASS
 
 Branch: improve/attempt-14-xgb-10000-rounds
