@@ -2,6 +2,77 @@
 
 ---
 
+## attempt-20: LogisticRegression stacking on XGB+LGB OOF probs — PASS
+
+Branch: improve/attempt-20-stacking-logreg
+Date: 2026-05-14
+Runtime: <5 min (no retraining)
+CV accuracy: 0.73680 (raw) → 0.73788 (tuned)
+Public leaderboard: 0.76038
+Std across folds: n/a (meta-model, no per-fold tracking)
+Naive baseline: 0.70900
+Hypothesis: A LogisticRegression meta-model trained on 6 meta-features
+  (xgb_prob_0-2, lgb_prob_0-2) can learn a smarter combination than a fixed
+  blend weight — trusting XGB when it's confident, LGB when XGB is uncertain,
+  and adjusting class-1 calibration separately.
+Changes vs attempt-19:
+  - Replaced fixed blend weight with LogisticRegression meta-model (C=0.03, lbfgs)
+  - 5-fold CV on meta features to produce OOF meta-probs
+  - Searched C in [0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0] × class_weight [None, balanced]
+  - Best: C=0.03, class_weight=None
+
+Result:
+  Tuned OOF 0.73788 — PASS (+0.00127 vs attempt-14's 0.73661, +0.00106 vs attempt-19
+  blend 0.73682). Public 0.76038 is a new best (+0.00415 over attempt-14's 0.75623).
+  The C value was essentially irrelevant — all None configs clustered at 0.73787–0.73788,
+  confirming logistic regression saturates early on these 6 well-separated meta-features.
+  balanced class_weight hurt (0.733 vs 0.738), consistent with the pattern across all
+  prior attempts that lighter/no weighting is better for accuracy.
+  Class-0 recall improved vs attempt-14 (+0.6pp: 90.9% → 91.5%), while class-1 slipped
+  slightly (-1.1pp: 54.3% → 53.2%) and class-2 fell slightly (-0.9pp: 24.2% → 23.3%).
+  Net accuracy is higher because class-0 dominates. The c1 multiplier rose to 1.510
+  (vs 1.260 for XGB alone) — the stacker underestimates class-1, needing more boosting.
+
+Confusion matrix:
+true \ pred    0         1         2
+0              677794    28250     34945
+1              35127     40089     151
+2              160194    15280     53293
+Per-class recall: class-0: 91.5%,  class-1: 53.2%,  class-2: 23.3%
+Verdict: PASS — 0.73788 tuned (+0.00127 vs attempt-14). New best public: 0.76038 (+0.00415).
+Next attempt should try: Add CatBoost OOF probs as a third base model to the stacking
+  meta-features. CatBoost handles categoricals differently from both XGB and LGB; if its
+  errors are orthogonal it may push the stack higher. Alternatively, try a gradient-boosted
+  meta-model (XGBoost or LGB on the 6 meta-features) which can learn non-linear combinations.
+
+---
+
+## attempt-19: XGB + LGB soft blend weight search — MIXED
+
+Branch: improve/attempt-19-xgb-lgb-blend
+Date: 2026-05-14
+Runtime: <1 min (no retraining)
+CV accuracy: n/a (raw) → 0.73682 (tuned, best weight xgb=0.82)
+Public leaderboard: not submitted
+Std across folds: n/a
+Naive baseline: 0.70900
+Hypothesis: A weighted average of XGB and LGB probabilities with tuned multipliers
+  may outperform either model alone if their errors are partially orthogonal.
+Changes vs attempt-18:
+  - Searched xgb_weight from 0.70 to 1.00 (step 0.01)
+  - lgb_weight = 1 - xgb_weight
+  - Tuned class multipliers on blended OOF probs
+
+Result:
+  Best blend (xgb=0.82, lgb=0.18) tuned OOF 0.73682 — MIXED (+0.00021 vs attempt-14's
+  0.73661). Marginal gain over XGB-only, confirming LGB adds small orthogonal signal.
+  Not submitted — gap too small to justify a submission slot ahead of stacking (attempt-20).
+
+Verdict: MIXED — +0.00021 over attempt-14 OOF. Not submitted.
+Next attempt should try: Stacking meta-model (attempt-20).
+
+---
+
 ## attempt-18: save XGB + LGB probability arrays for blending — INFRASTRUCTURE
 
 Branch: improve/attempt-18-save-probs
