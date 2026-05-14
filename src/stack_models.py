@@ -126,7 +126,6 @@ def main():
             X_te = scaler.transform(meta_test)
 
             clf = LogisticRegression(
-                multi_class="multinomial",
                 solver="lbfgs",
                 C=C,
                 class_weight=class_weight,
