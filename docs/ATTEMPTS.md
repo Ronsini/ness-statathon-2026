@@ -2,6 +2,57 @@
 
 ---
 
+## attempt-17: XGBoost Optuna best params (350k search) on full 5-fold — FAIL
+
+Branch: improve/attempt-17-xgb-optuna-full
+Date: 2026-05-13
+Runtime: 2745s
+CV accuracy: 0.72186 (raw) → 0.72790 (tuned)
+Public leaderboard: not submitted
+Std across folds: 0.00039
+Naive baseline: 0.70900
+Hypothesis: Optuna trial-31 scored 0.72830 on the 350k/3-fold subsample vs attempt-14
+  baseline params scoring 0.72562 (+0.00268 advantage). Running the best Optuna params
+  on the full 5-fold setup to see if the gain transfers.
+Changes vs attempt-14:
+  - learning_rate: 0.03 → 0.02470
+  - max_depth: 7 → 5
+  - min_child_weight: 10 → 16
+  - subsample: 0.85 → 0.7625
+  - colsample_bytree: 0.85 → 0.8746
+  - reg_lambda: 3.0 → 2.474
+  - reg_alpha: 0.2 → 1.164
+  - gamma: 0.0 → 2.700
+  - max_bin: 256 → 128
+
+Result:
+  Tuned accuracy 0.72790 — FAIL (−0.00871 vs attempt-14's 0.73661). The Optuna params
+  completely collapsed class-1 recall from 54.3% (attempt-14) to 0.0% — only 8 correct
+  class-1 predictions out of 75,367. The more aggressive regularization (gamma=2.7,
+  shallower trees, higher reg_alpha) suppressed class-1 detection on the full dataset.
+  All 5 folds hit the 10000 estimator cap (best iters: 9999, 9977, 9992, 9986, 9960),
+  confirming the params need even more rounds to converge on full data. The multiplier
+  tuned to c1×0.300 (floor of the search range) — same as on the subsample — meaning the
+  model essentially gave up on class-1 entirely. The subsample calibration mismatch
+  (c1×0.300 subsample vs c1×1.260 attempt-14 full run) was the warning sign that these
+  params were tuned for a different data regime.
+
+Confusion matrix:
+true \ pred    0         1         2
+0              705588    249       35152
+1              75346     8         13
+2              173427    189       55151
+Per-class recall: class-0: 95.2%,  class-1: 0.0%,  class-2: 24.1%
+Verdict: FAIL — −0.00871 vs current best. Optuna params overfit to the subsample's
+  calibration regime and destroyed class-1 recall on the full dataset.
+Next attempt should try: Run Optuna again but on the full dataset (not 350k subsample),
+  or accept that the attempt-14 params are near-optimal and explore orthogonal approaches
+  (LGB+XGB blend, ordinal regression). If continuing with Optuna, the c1 multiplier
+  behavior on the subsample is a reliable signal — params that produce c1 near floor
+  (0.30) on subsample will likely collapse class-1 on full data.
+
+---
+
 ## attempt-14: XGBoost n_estimators 5000 → 10000 — PASS
 
 Branch: improve/attempt-14-xgb-10000-rounds
