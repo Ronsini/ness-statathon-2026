@@ -8,9 +8,12 @@ Outputs:
   - output/best_xgb_params.json      Best params ready to paste into train_model.py
 
 Usage:
-  python src/tune_xgb_params.py
+  python src/tune_xgb_params.py               # full Optuna search
+  python src/tune_xgb_params.py --baseline    # single eval with attempt-14 params
 """
 
+import argparse
+import datetime
 import json
 import time
 from itertools import product
@@ -47,6 +50,20 @@ FIXED_PARAMS = {
     "early_stopping_rounds": 100,
     "n_jobs": -1,
     "random_state": RANDOM_STATE,
+}
+
+# Attempt-14 params for baseline comparison
+BASELINE_PARAMS = {
+    **FIXED_PARAMS,
+    "learning_rate": 0.03,
+    "max_depth": 7,
+    "min_child_weight": 10,
+    "subsample": 0.85,
+    "colsample_bytree": 0.85,
+    "reg_lambda": 3.0,
+    "reg_alpha": 0.2,
+    "gamma": 0.0,
+    "max_bin": 256,
 }
 
 HIGH_CARD_COLS = ["zip.code", "house.color", "email_domain"]
@@ -249,6 +266,67 @@ def tune_multipliers(oof_preds: np.ndarray, y: np.ndarray) -> tuple[float, tuple
 
 
 # -----------------------------------------------------------------------------
+# Core CV evaluation (shared by Optuna and baseline)
+# -----------------------------------------------------------------------------
+
+def evaluate_params(
+    params: dict,
+    X: pd.DataFrame,
+    y: np.ndarray,
+    zip_keys: pd.Series,
+    age_credit_keys: pd.Series,
+    zip_sales_keys: pd.Series,
+    cov_dwell_keys: pd.Series,
+) -> tuple[float, float, tuple, list[float]]:
+    for col in OOF_COLS:
+        X[col] = np.nan
+
+    skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    oof_preds = np.zeros((len(X), 3))
+    fold_scores = []
+
+    for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y)):
+        y_tr = y[tr_idx]
+
+        # Nested OOF for training rows
+        inner_skf = StratifiedKFold(
+            n_splits=N_FOLDS, shuffle=True,
+            random_state=RANDOM_STATE + fold + 100,
+        )
+        for inner_tr_pos, inner_va_pos in inner_skf.split(X.iloc[tr_idx], y_tr):
+            inner_tr_idx = tr_idx[inner_tr_pos]
+            inner_va_idx = tr_idx[inner_va_pos]
+            inner_maps = build_encoding_maps(
+                inner_tr_idx, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys,
+            )
+            fill_rate_columns(X, inner_va_idx, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys, inner_maps)
+
+        # Outer maps for validation rows
+        outer_maps = build_encoding_maps(
+            tr_idx, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys,
+        )
+        fill_rate_columns(X, va_idx, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys, outer_maps)
+
+        X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
+        y_tr_fold, y_va = y[tr_idx], y[va_idx]
+        sample_weights_tr = np.array([CLASS_WEIGHTS[yi] for yi in y_tr_fold])
+
+        model = xgb.XGBClassifier(**params)
+        model.fit(
+            X_tr, y_tr_fold,
+            sample_weight=sample_weights_tr,
+            eval_set=[(X_va, y_va)],
+            verbose=False,
+        )
+        oof_preds[va_idx] = model.predict_proba(X_va)
+        fold_scores.append(accuracy_score(y_va, oof_preds[va_idx].argmax(axis=1)))
+
+    raw_acc = accuracy_score(y, oof_preds.argmax(axis=1))
+    tuned_acc, best_mult = tune_multipliers(oof_preds, y)
+    return raw_acc, tuned_acc, best_mult, fold_scores
+
+
+# -----------------------------------------------------------------------------
 # Optuna objective
 # -----------------------------------------------------------------------------
 
@@ -267,49 +345,9 @@ def make_objective(X, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_ke
             "max_bin": trial.suggest_categorical("max_bin", [128, 256, 512]),
         }
 
-        for col in OOF_COLS:
-            X[col] = np.nan
-
-        skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
-        oof_preds = np.zeros((len(X), 3))
-
-        for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y)):
-            y_tr = y[tr_idx]
-
-            # Nested OOF for training rows
-            inner_skf = StratifiedKFold(
-                n_splits=N_FOLDS, shuffle=True,
-                random_state=RANDOM_STATE + fold + 100,
-            )
-            for inner_tr_pos, inner_va_pos in inner_skf.split(X.iloc[tr_idx], y_tr):
-                inner_tr_idx = tr_idx[inner_tr_pos]
-                inner_va_idx = tr_idx[inner_va_pos]
-                inner_maps = build_encoding_maps(
-                    inner_tr_idx, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys,
-                )
-                fill_rate_columns(X, inner_va_idx, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys, inner_maps)
-
-            # Outer maps for validation rows
-            outer_maps = build_encoding_maps(
-                tr_idx, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys,
-            )
-            fill_rate_columns(X, va_idx, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys, outer_maps)
-
-            X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
-            y_tr, y_va = y[tr_idx], y[va_idx]
-            sample_weights_tr = np.array([CLASS_WEIGHTS[yi] for yi in y_tr])
-
-            model = xgb.XGBClassifier(**params)
-            model.fit(
-                X_tr, y_tr,
-                sample_weight=sample_weights_tr,
-                eval_set=[(X_va, y_va)],
-                verbose=False,
-            )
-            oof_preds[va_idx] = model.predict_proba(X_va)
-
-        raw_acc = accuracy_score(y, oof_preds.argmax(axis=1))
-        tuned_acc, best_mult = tune_multipliers(oof_preds, y)
+        raw_acc, tuned_acc, best_mult, _ = evaluate_params(
+            params, X, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys,
+        )
 
         line = (
             f"Trial {trial.number:>3d} | "
@@ -334,7 +372,7 @@ def make_objective(X, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_ke
 # Main
 # -----------------------------------------------------------------------------
 
-def main():
+def prepare_data() -> tuple:
     t0 = time.time()
     print(f"Loading and preparing {SAMPLE_N:,}-row subsample...", flush=True)
 
@@ -344,25 +382,17 @@ def main():
     y = train["cancel"].astype(int).values
     X = train.drop(columns=["id", "cancel"])
 
-    # Group features (computed on subsample)
     X = add_group_features(X, X)
-
-    # Row-level engineering (converts zip.code to string at the end)
     X = add_engineered_features(X)
 
-    # Pre-compute OOF keys before OHE removes the raw categorical columns
     zip_keys = X["zip.code"].astype(str).reset_index(drop=True)
     age_credit_keys = make_age_credit_key(X).reset_index(drop=True)
     zip_sales_keys = make_zip_sales_key(X).reset_index(drop=True)
     cov_dwell_keys = make_cov_dwell_key(X).reset_index(drop=True)
 
-    # Frequency/count encoding for high-cardinality categoricals
     X = add_frequency_features(X, HIGH_CARD_COLS)
-
-    # One-hot encoding for low-cardinality categoricals
     X = pd.get_dummies(X, columns=LOW_CARD_COLS, dummy_na=True)
 
-    # Drop remaining non-numeric columns
     cols_to_drop = X.select_dtypes(include=["object", "string", "category"]).columns.tolist()
     if cols_to_drop:
         print(f"Dropping non-numeric columns: {cols_to_drop}", flush=True)
@@ -374,20 +404,50 @@ def main():
 
     X = X.astype(float)
 
-    # OOF placeholder columns (filled per fold inside each trial)
     for col in OOF_COLS:
         X[col] = np.nan
 
     X = X.reset_index(drop=True)
     y = np.asarray(y)
 
-    print(f"Features: {X.shape[1]}  Rows: {len(X):,}  Folds: {N_FOLDS}  Trials: {N_TRIALS}", flush=True)
+    print(f"Features: {X.shape[1]}  Rows: {len(X):,}  Folds: {N_FOLDS}", flush=True)
     print(f"Prep done in {time.time() - t0:.0f}s", flush=True)
     print("-" * 100, flush=True)
 
+    return X, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys, t0
+
+
+def run_baseline(X, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys, t0):
+    print("Running baseline (attempt-14 params) on 350k / 3-fold...", flush=True)
+    raw_acc, tuned_acc, best_mult, fold_scores = evaluate_params(
+        BASELINE_PARAMS, X, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys,
+    )
+
+    elapsed = time.time() - t0
+    fold_str = "  ".join(f"fold{i+1}={s:.5f}" for i, s in enumerate(fold_scores))
+    lines = [
+        f"Baseline — attempt-14 params on {SAMPLE_N:,} rows / {N_FOLDS}-fold",
+        f"Run date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"Fold scores: {fold_str}",
+        f"Raw OOF accuracy:   {raw_acc:.5f}",
+        f"Tuned OOF accuracy: {tuned_acc:.5f}",
+        f"Best multipliers:   c0x1.000  c1x{best_mult[1]:.3f}  c2x{best_mult[2]:.3f}",
+        f"Runtime: {elapsed:.0f}s",
+    ]
+    output = "\n".join(lines)
+    print(output, flush=True)
+
+    out_path = OUTPUT_DIR / "xgb_baseline_350k_3fold.txt"
+    with open(out_path, "w") as f:
+        f.write(output + "\n")
+    print(f"\nSaved to {out_path}", flush=True)
+
+
+def run_optuna(X, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys, t0):
+    print(f"Trials: {N_TRIALS}", flush=True)
+
     results_path = OUTPUT_DIR / "optuna_xgb_results.txt"
     with open(results_path, "w") as f:
-        import datetime
         f.write(f"Optuna XGBoost search — {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
         f.write(f"SAMPLE_N={SAMPLE_N:,}  N_FOLDS={N_FOLDS}  N_TRIALS={N_TRIALS}\n")
         f.write("-" * 100 + "\n")
@@ -414,6 +474,20 @@ def main():
         f.write("-" * 100 + "\n")
         f.write(f"Best trial: {best.number}  tuned_acc={best.value:.5f}\n")
         f.write(f"Best params: {json.dumps(best.params, indent=2)}\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="XGBoost hyperparameter search / baseline eval")
+    parser.add_argument("--baseline", action="store_true",
+                        help="Run a single eval with attempt-14 params instead of Optuna search")
+    args = parser.parse_args()
+
+    X, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys, t0 = prepare_data()
+
+    if args.baseline:
+        run_baseline(X, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys, t0)
+    else:
+        run_optuna(X, y, zip_keys, age_credit_keys, zip_sales_keys, cov_dwell_keys, t0)
 
 
 if __name__ == "__main__":
