@@ -35,16 +35,15 @@ SAMPLE_N = None  # None = full 1M rows; set an int to subsample for quick iterat
 N_FOLDS = 5
 RANDOM_STATE = 42
 
-ATTEMPT_LABEL = "improve/attempt-14-xgb-10000-rounds"
+ATTEMPT_LABEL = "improve/attempt-17-xgb-optuna-full"
 ATTEMPT_NOTES = """
-Changes vs attempt-13:
-  - n_estimators: 5000 -> 10000 (only change)
-  - Baseline is attempt-13 (best public score 0.75207)
-  - All 5 folds in attempt-13 hit the 5000 estimator cap with validation logloss
-    still declining at round 4999 (final logloss: 0.592, 0.593, 0.593, 0.594, 0.592).
-    Clear sign of undertraining — raising to 10000 to test if more rounds help.
-  - Everything else unchanged: same preprocessing, OOF encodings, count/frequency
-    features, one-hot features, class weights, multiplier tuning, folds, random_state.
+Changes vs attempt-14:
+  - Uses best XGBoost params from attempt-16 Optuna search.
+  - Optuna best trial scored 0.72830 on 350k / 3-fold.
+  - Attempt-14 baseline params scored 0.72562 on the same 350k / 3-fold setup.
+  - Improvement on sample baseline: +0.00268.
+  - Full 5-fold run to test whether tuned params generalize.
+  - Same preprocessing, OOF encodings, class weights, multiplier tuning, folds, and submission format.
 """
 
 CLASS_WEIGHTS = {0: 1.0, 1: 1.3, 2: 1.1}
@@ -53,15 +52,16 @@ XGB_PARAMS = {
     "objective": "multi:softprob",
     "num_class": 3,
     "eval_metric": "mlogloss",
-    "learning_rate": 0.03,
-    "max_depth": 7,
-    "min_child_weight": 10,
-    "subsample": 0.85,
-    "colsample_bytree": 0.85,
-    "reg_lambda": 3.0,
-    "reg_alpha": 0.2,
+    "learning_rate": 0.024701167309159326,
+    "max_depth": 5,
+    "min_child_weight": 16,
+    "subsample": 0.7624914057708336,
+    "colsample_bytree": 0.8745917491919075,
+    "reg_lambda": 2.474141098010141,
+    "reg_alpha": 1.163515452183569,
+    "gamma": 2.7002054582222734,
     "tree_method": "hist",
-    "max_bin": 256,
+    "max_bin": 128,
     "n_estimators": 10000,
     "early_stopping_rounds": 100,
     "n_jobs": -1,
