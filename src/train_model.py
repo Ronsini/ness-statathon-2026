@@ -35,16 +35,17 @@ SAMPLE_N = None  # None = full 1M rows; set an int to subsample for quick iterat
 N_FOLDS = 5
 RANDOM_STATE = 42
 
-ATTEMPT_LABEL = "improve/attempt-14-xgb-10000-rounds"
+ATTEMPT_LABEL = "improve/attempt-18-save-probs"
 ATTEMPT_NOTES = """
-Changes vs attempt-13:
-  - n_estimators: 5000 -> 10000 (only change)
-  - Baseline is attempt-13 (best public score 0.75207)
-  - All 5 folds in attempt-13 hit the 5000 estimator cap with validation logloss
-    still declining at round 4999 (final logloss: 0.592, 0.593, 0.593, 0.594, 0.592).
-    Clear sign of undertraining — raising to 10000 to test if more rounds help.
-  - Everything else unchanged: same preprocessing, OOF encodings, count/frequency
-    features, one-hot features, class weights, multiplier tuning, folds, random_state.
+Changes vs attempt-14:
+  - No model changes. All params, preprocessing, OOF encodings, and folds identical
+    to attempt-14 (public 0.75623).
+  - Saves XGB probability arrays for blending/stacking (attempt-19+):
+      output/xgb_oof_probs.npy   shape (n_train, 3) — OOF probabilities
+      output/xgb_test_probs.npy  shape (n_test, 3)  — averaged test probabilities
+      output/y_train.npy         shape (n_train,)   — true labels
+      output/test_ids.npy        shape (n_test,)    — test row ids
+  - Run save_lgb_probs.py separately to generate the LGB counterparts.
 """
 
 CLASS_WEIGHTS = {0: 1.0, 1: 1.3, 2: 1.1}
@@ -525,6 +526,12 @@ def main():
     multipliers_arr = np.array(best_mult)
     oof_class = (oof_preds * multipliers_arr).argmax(axis=1)
     test_class = (test_preds * multipliers_arr).argmax(axis=1)
+
+    np.save(OUTPUT_DIR / "xgb_oof_probs.npy", oof_preds)
+    np.save(OUTPUT_DIR / "xgb_test_probs.npy", test_preds)
+    np.save(OUTPUT_DIR / "y_train.npy", y)
+    np.save(OUTPUT_DIR / "test_ids.npy", test_ids)
+    log("Saved XGB probability arrays to output/", t0)
 
     overall_acc = accuracy_score(y, oof_class)
     cm = confusion_matrix(y, oof_class)
