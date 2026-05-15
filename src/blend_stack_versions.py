@@ -84,7 +84,7 @@ def main():
     print("-" * 100, flush=True)
 
     results = []
-    w_values = np.round(np.arange(0.70, 1.01, 0.01), 2)
+    w_values = np.round(np.linspace(0.70, 1.00, 31), 2)
 
     for w in w_values:
         blend_oof  = w * cat_oof  + (1 - w) * meta_oof
