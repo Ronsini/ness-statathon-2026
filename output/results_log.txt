@@ -70,3 +70,158 @@ true_0  678658   23037   39294
 true_1   47709   27068     590
 true_2  159096   12846   56825
 
+========================================================================
+Attempt : improve/attempt-13-xgb-clean-preprocess
+Date    : 2026-05-13 00:24
+Runtime : 2277s
+Changes vs attempt-8:
+  - Pure XGBoost (XGBClassifier) replacing LightGBM — no LightGBM or CatBoost
+  - Baseline is attempt-8 (best public score 0.74099)
+  - Clean numeric preprocessing for XGBoost:
+      * Count/frequency encoding for high-cardinality categoricals:
+        zip.code, house.color, email_domain
+      * One-hot encoding (pd.get_dummies, dummy_na=True) for low-cardinality:
+        credit, coverage.type, dwelling.type, ni.gender,
+        original_quote_weekday, season_of_renewal, sales.channel
+      * Remaining object/string/category columns dropped before XGBoost
+  - Added safe row-level features from attempt-12:
+      * is_first_year_with_claim: (tenure < 1.1) & (claim.ind == 1)
+      * len_at_res_missing, sales_channel_missing, tenure_missing,
+        premium_missing, square_footage_missing
+  - Kept all attempt-8 OOF target encodings (8 columns, nested OOF for train rows)
+  - Skipped profile OOF and zip_year OOF (attempt-12 showed they hurt public score)
+  - Class weights {0:1.0, 1:1.3, 2:1.1} and multiplier tuning unchanged from attempt-8
+------------------------------------------------------------------------
+============================================================
+5-fold CV accuracy (mean): 0.73312
+5-fold CV accuracy (std):  0.00034
+OOF accuracy (raw argmax): 0.73312
+OOF accuracy (tuned):      0.73558
+Multipliers: c0x1.00  c1x1.260  c2x0.890
+Naive baseline (all 0):    0.70900
+Test prediction dist:      class-0: 2006 (83.2%)  class-1: 199 (8.3%)  class-2: 207 (8.6%)
+============================================================
+
+Confusion matrix (rows=true, cols=pred):
+        pred_0  pred_1  pred_2
+true_0  673717   29878   37394
+true_1   35356   39755     256
+true_2  156902   16562   55303
+
+========================================================================
+Attempt : improve/attempt-14-xgb-10000-rounds
+Date    : 2026-05-13 15:03
+Runtime : 3486s
+Changes vs attempt-13:
+  - n_estimators: 5000 -> 10000 (only change)
+  - Baseline is attempt-13 (best public score 0.75207)
+  - All 5 folds in attempt-13 hit the 5000 estimator cap with validation logloss
+    still declining at round 4999 (final logloss: 0.592, 0.593, 0.593, 0.594, 0.592).
+    Clear sign of undertraining — raising to 10000 to test if more rounds help.
+  - Everything else unchanged: same preprocessing, OOF encodings, count/frequency
+    features, one-hot features, class weights, multiplier tuning, folds, random_state.
+------------------------------------------------------------------------
+============================================================
+5-fold CV accuracy (mean): 0.73426
+5-fold CV accuracy (std):  0.00035
+OOF accuracy (raw argmax): 0.73426
+OOF accuracy (tuned):      0.73661
+Multipliers: c0x1.00  c1x1.260  c2x0.890
+Naive baseline (all 0):    0.70900
+Test prediction dist:      class-0: 2014 (83.5%)  class-1: 190 (7.9%)  class-2: 208 (8.6%)
+============================================================
+
+Confusion matrix (rows=true, cols=pred):
+        pred_0  pred_1  pred_2
+true_0  673544   29368   38077
+true_1   34035   40922     410
+true_2  157347   16043   55377
+
+========================================================================
+Attempt : improve/attempt-15-xgb-lr002-15000
+Date    : 2026-05-13 18:38
+Runtime : 4812s
+Changes vs attempt-14:
+  - learning_rate: 0.03 -> 0.02
+  - n_estimators: 10000 -> 15000
+  - Baseline is attempt-14 (best public score 0.75623)
+  - Attempt-14 converged naturally at 6643-7737 rounds (no cap hit), so lower lr
+    is not a guaranteed improvement the way the n_estimators raise was.
+  - Testing whether smoother gradient steps near convergence squeeze additional accuracy.
+    Lower lr may find a better local minimum; early stopping will cap at the right point.
+  - No feature or preprocessing changes.
+------------------------------------------------------------------------
+============================================================
+5-fold CV accuracy (mean): 0.73430
+5-fold CV accuracy (std):  0.00008
+OOF accuracy (raw argmax): 0.73430
+OOF accuracy (tuned):      0.73644
+Multipliers: c0x1.00  c1x1.300  c2x0.880
+Naive baseline (all 0):    0.70900
+Test prediction dist:      class-0: 2008 (83.3%)  class-1: 203 (8.4%)  class-2: 201 (8.3%)
+============================================================
+
+Confusion matrix (rows=true, cols=pred):
+        pred_0  pred_1  pred_2
+true_0  673045   30851   37093
+true_1   32861   42155     351
+true_2  157365   16928   54474
+
+========================================================================
+Attempt : improve/attempt-17-xgb-optuna-full
+Date    : 2026-05-13 23:34
+Runtime : 2745s
+Changes vs attempt-14:
+  - Uses best XGBoost params from attempt-16 Optuna search.
+  - Optuna best trial scored 0.72830 on 350k / 3-fold.
+  - Attempt-14 baseline params scored 0.72562 on the same 350k / 3-fold setup.
+  - Improvement on sample baseline: +0.00268.
+  - Full 5-fold run to test whether tuned params generalize.
+  - Same preprocessing, OOF encodings, class weights, multiplier tuning, folds, and submission format.
+------------------------------------------------------------------------
+============================================================
+5-fold CV accuracy (mean): 0.72186
+5-fold CV accuracy (std):  0.00039
+OOF accuracy (raw argmax): 0.72186
+OOF accuracy (tuned):      0.72790
+Multipliers: c0x1.00  c1x0.300  c2x0.870
+Naive baseline (all 0):    0.70900
+Test prediction dist:      class-0: 2198 (91.1%)  class-1: 2 (0.1%)  class-2: 212 (8.8%)
+============================================================
+
+Confusion matrix (rows=true, cols=pred):
+        pred_0  pred_1  pred_2
+true_0  705588     249   35152
+true_1   75346       8      13
+true_2  173427     189   55151
+
+========================================================================
+Attempt : improve/attempt-18-save-probs
+Date    : 2026-05-14 14:10
+Runtime : 3638s
+Changes vs attempt-14:
+  - No model changes. All params, preprocessing, OOF encodings, and folds identical
+    to attempt-14 (public 0.75623).
+  - Saves XGB probability arrays for blending/stacking (attempt-19+):
+      output/xgb_oof_probs.npy   shape (n_train, 3) — OOF probabilities
+      output/xgb_test_probs.npy  shape (n_test, 3)  — averaged test probabilities
+      output/y_train.npy         shape (n_train,)   — true labels
+      output/test_ids.npy        shape (n_test,)    — test row ids
+  - Run save_lgb_probs.py separately to generate the LGB counterparts.
+------------------------------------------------------------------------
+============================================================
+5-fold CV accuracy (mean): 0.73426
+5-fold CV accuracy (std):  0.00035
+OOF accuracy (raw argmax): 0.73426
+OOF accuracy (tuned):      0.73661
+Multipliers: c0x1.00  c1x1.260  c2x0.890
+Naive baseline (all 0):    0.70900
+Test prediction dist:      class-0: 2014 (83.5%)  class-1: 190 (7.9%)  class-2: 208 (8.6%)
+============================================================
+
+Confusion matrix (rows=true, cols=pred):
+        pred_0  pred_1  pred_2
+true_0  673544   29368   38077
+true_1   34035   40922     410
+true_2  157347   16043   55377
+
