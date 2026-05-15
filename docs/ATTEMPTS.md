@@ -2,6 +2,68 @@
 
 ---
 
+## attempt-23: Blend attempt-21 and attempt-22 stack probabilities — PASS
+
+Branch: improve/attempt-23-blend-stack-versions
+Date: 2026-05-15
+Runtime: <1 min (no retraining)
+CV accuracy: n/a (raw) → 0.73983 (tuned, best w)
+Public leaderboard: 0.76869
+Std across folds: n/a
+Naive baseline: 0.70900
+Hypothesis: attempt-21 (9 raw meta features) generalizes better than attempt-22 (34 meta
+  features). A convex blend final = w*att21 + (1-w)*att22 should capture att22's extra
+  signal without its OOF overfitting. Search w in [0.70, 1.00].
+Changes vs attempt-22:
+  - No new model training — blends saved stack_cat and stack_cat_meta probability arrays
+  - Multiplier search focused on [1.45, 1.85] × [0.85, 1.05] step 0.01
+  - Reports delta vs attempt-21 test distribution per weight
+
+Result:
+  Tuned OOF 0.73983 — PASS (+0.00127 vs attempt-21's 0.73856). Public 0.76869 is a new
+  best (+0.00415 over attempt-21's 0.76454). Blending attempt-22's extra signal in at a
+  small weight improved both OOF and public, confirming the meta features carry real signal
+  when diluted to prevent overfitting.
+
+Confusion matrix: not captured
+Per-class recall: not captured
+Verdict: PASS — new best public 0.76869. OOF +0.00127 vs attempt-21.
+Next attempt should try: Train a LightGBM meta-model on the 34 meta features instead of
+  LogisticRegression. With heavy regularization (reg_lambda=20, min_child_samples=200),
+  a tree-based meta-model may capture non-linear interactions between the base model
+  probabilities that logistic regression cannot.
+
+---
+
+## attempt-22: XGB + LGB + CAT stack with 34 meta features (confidence + agreement) — MIXED
+
+Branch: improve/attempt-22-stack-meta-features
+Date: 2026-05-15
+Runtime: <5 min (no retraining)
+CV accuracy: n/a (raw) → n/a (tuned)
+Public leaderboard: 0.76315
+Std across folds: n/a
+Naive baseline: 0.70900
+Hypothesis: Enriching the 9 raw probabilities with confidence (max prob, top-2 margin),
+  cross-model agreement, and class-level mean/std/range gives the LogReg stacker signal
+  about when rows are uncertain or when one base model should dominate.
+Changes vs attempt-21:
+  - Meta features expanded from 9 to 34 (9 raw + 25 derived)
+  - Finer multiplier search: step 0.02/0.005 focused on c1 [1.20, 2.20], c2 [0.70, 1.20]
+  - C search extended to include C=0.003
+
+Result:
+  Public 0.76315 — below attempt-21's 0.76454 (-0.00139). The extra features introduced
+  OOF overfitting: OOF may look similar but the model learned noise that doesn't generalize.
+  The LogReg stacker is not the right vehicle for 34 features — it saturates and the
+  additional features add noise rather than signal for a linear model.
+
+Verdict: MIXED — public regressed vs attempt-21 despite richer features.
+Next attempt should try: Blend attempt-21 and attempt-22 outputs at w=0.70–1.00 to recover
+  attempt-22's signal while anchoring to attempt-21's better generalization.
+
+---
+
 ## attempt-21: XGB + LGB + CatBoost 3-model stack (9 meta features) — PASS
 
 Branch: improve/attempt-21-cat-stack
