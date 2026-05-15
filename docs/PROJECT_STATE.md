@@ -1,13 +1,13 @@
-# Project State (last updated 2026-05-14)
+# Project State (last updated 2026-05-15)
 
 ## Current best
 
-Branch: improve/attempt-20-stacking-logreg
-CV accuracy: 0.73788 (tuned; C=0.03, class_weight=None, c0×1.00, c1×1.510, c2×0.980)
-Public leaderboard: 0.76038
-Submission file: output/submission_stack.csv
+Branch: improve/attempt-21-cat-stack
+CV accuracy: 0.73856 (tuned)
+Public leaderboard: 0.76454
+Submission file: output/submission_stack_cat.csv
 
-## Pipeline summary (attempt-20)
+## Pipeline summary (attempt-21)
 
 Data: 1,045,123 training rows, 2,412 test rows
 
@@ -28,15 +28,22 @@ Class weights: {0: 1.0, 1: 1.3, 2: 1.1}
 OOF tuned accuracy: 0.72963  Multipliers: c0×1.00, c1×1.260, c2×0.900
 Saved: output/lgb_oof_probs.npy, output/lgb_test_probs.npy
 
-### Meta-model: LogisticRegression (attempt-20)
-Meta features: xgb_prob_0, xgb_prob_1, xgb_prob_2, lgb_prob_0, lgb_prob_1, lgb_prob_2
+### Base model 3: CatBoost (attempt-21)
+Features: same attempt-8 feature set (native categoricals via Pool API)
+Key params: iterations=8000, learning_rate=0.03, depth=7, l2_leaf_reg=5,
+  early_stopping_rounds=100, loss_function=MultiClass
+Class weights: {0: 1.0, 1: 1.3, 2: 1.1}
+Saved: output/cat_oof_probs.npy, output/cat_test_probs.npy
+
+### Meta-model: LogisticRegression (attempt-21)
+Meta features: xgb_prob_0-2, lgb_prob_0-2, cat_prob_0-2 (9 total)
 Training: 5-fold StratifiedKFold on OOF probs (StandardScaler per fold)
-Best config: C=0.03, solver=lbfgs, class_weight=None
+Best config: not captured (all C values near-equivalent as in attempt-20)
 Decision rule: two-stage multiplier search (coarse step 0.05, fine step 0.01 ±0.10)
-  attempt-20 best multipliers: c0×1.00, c1×1.510, c2×0.980
 
 ## What's been tried (newest first)
 
+attempt-21: PASS  +0.00068 OOF / +0.00416 public — XGB+LGB+CAT 9-feature stack; public 0.76454
 attempt-20: PASS  +0.00127 — LogisticRegression stacking on XGB+LGB probs; public 0.76038
 attempt-19: MIXED +0.00021 — XGB/LGB soft blend (best xgb=0.82); not submitted
 attempt-18: INFRA         — save XGB/LGB probability arrays for blending
@@ -59,6 +66,8 @@ attempt-1:  PASS  baseline — LightGBM on 300k subsample (0.72570)
 - Stacking (logistic regression on base model OOF probs) outperforms both single models
   and fixed blending. Attempt-20 gained +0.00415 public over attempt-14 XGB alone.
   The meta-model learns adaptive combination vs fixed blend weight.
+- Adding CatBoost as a third base model added +0.00416 public (attempt-21). Its different
+  categorical encoding produces partially orthogonal errors vs XGB and LGB.
 - XGBoost with clean numeric preprocessing outperforms LightGBM on this dataset.
   The key driver was class-1 recall: 35.9% (LGB) → 52.7% (XGB attempt-13) → 54.3% (attempt-14).
 - Attempt-6's conclusion that "XGBoost is inferior" was based on a blend without proper
@@ -74,20 +83,17 @@ attempt-1:  PASS  baseline — LightGBM on 300k subsample (0.72570)
 - Class-0 dominance (71% of rows) is the binding constraint. Lighter class weights
   with multiplier correction outperform aggressive upweighting.
 - LogisticRegression C value is irrelevant on these meta-features (all configs 0.01–10.0
-  score 0.73787–0.73788) — the 6-feature space is well-separated.
+  score 0.73787–0.73788) — the feature space is well-separated.
 - balanced class_weight consistently hurts accuracy across all meta-model configs.
 
 ## Open ideas (untried)
 
-- Add CatBoost as a third base model: CatBoost handles categoricals natively and
-  differently from both XGB and LGB. If its errors are orthogonal, a 9-feature meta-model
-  (XGB+LGB+CAT probs) may push the stack higher.
-- Non-linear meta-model: XGBoost or LightGBM on the 6 meta-features. LogReg is saturating
-  (C insensitive) so a tree-based meta-model might capture non-linear combinations.
-- More base models: train XGB with different feature subsets or hyperparameters to
-  generate diverse OOF probs for stacking.
-- Class-1 feature hunt: find features that specifically separate class-1 from class-0/2.
-  Current class-1 recall at 53.2% — if there are behavioral/engagement columns, they
-  could add signal that no amount of ensemble will recover.
-- Ordinal regression: two binary classifiers P(cancel≥1) and P(cancel≥2) exploiting
-  the ordered class structure.
+- Richer meta features: confidence (max prob), top-2 margin, cross-model agreement,
+  class-level mean/std/range across models. A 34-feature meta-space may help the stacker
+  know when a row is uncertain or when one model should be trusted more.
+- Finer multiplier search: current step 0.05 coarse / 0.01 fine. Step 0.02 coarse /
+  0.005 fine focused on [1.20, 2.20] × [0.70, 1.20] (the known good region).
+- Non-linear meta-model: XGBoost or LightGBM on meta features.
+- Class-1 feature hunt: current recall ~53%. Behavioral/engagement columns might add
+  signal no ensemble can recover.
+- Ordinal regression: two binary classifiers P(cancel≥1) and P(cancel≥2).

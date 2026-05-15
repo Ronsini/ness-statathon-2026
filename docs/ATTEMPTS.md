@@ -2,6 +2,39 @@
 
 ---
 
+## attempt-21: XGB + LGB + CatBoost 3-model stack (9 meta features) — PASS
+
+Branch: improve/attempt-21-cat-stack
+Date: 2026-05-15
+Runtime: ~4–5 hours (CatBoost 5-fold on 1M rows) + <5 min (stacking)
+CV accuracy: n/a (raw) → 0.73856 (tuned)
+Public leaderboard: 0.76454
+Std across folds: n/a (meta-model)
+Naive baseline: 0.70900
+Hypothesis: Adding CatBoost OOF probabilities as a third base model gives the stacker
+  a 9-feature meta-space (xgb_prob_0-2, lgb_prob_0-2, cat_prob_0-2). CatBoost handles
+  categoricals natively and differently from both XGB and LGB; if its errors are
+  orthogonal, the meta-model gains additional signal.
+Changes vs attempt-20:
+  - Added CatBoost base model (iterations=8000, lr=0.03, depth=7, l2_leaf_reg=5)
+  - Meta features expanded from 6 to 9 (added cat_prob_0, cat_prob_1, cat_prob_2)
+  - Stacking script: src/stack_models_cat.py
+
+Result:
+  Tuned OOF 0.73856 vs attempt-20's 0.73788 (+0.00068 OOF). Public 0.76454 is a new
+  best (+0.00416 over attempt-20's 0.76038). The OOF gain is modest but the public
+  gain confirms CatBoost adds orthogonal signal — its different handling of categorical
+  features produces errors that are partially independent of XGB and LGB.
+
+Confusion matrix: not captured
+Per-class recall: not captured
+Verdict: PASS — new best public 0.76454. OOF gain small but public gain consistent with prior stack gains.
+Next attempt should try: Add confidence and disagreement meta features (max prob, top-2 margin,
+  cross-model agreement) to the 9 raw probs. A finer multiplier search (step 0.02/0.005 vs
+  0.05/0.01) may also recover additional accuracy from the wider class-1 underestimation range.
+
+---
+
 ## attempt-20: LogisticRegression stacking on XGB+LGB OOF probs — PASS
 
 Branch: improve/attempt-20-stacking-logreg
