@@ -2,6 +2,42 @@
 
 ---
 
+## attempt-24: LightGBM meta-stacker on 34 meta features — PASS
+
+Branch: improve/attempt-24-lgb-meta-stacker
+Date: 2026-05-15
+Runtime: <5 min (no retraining)
+CV accuracy: n/a (raw) → 0.75623 (tuned)
+Public leaderboard: 0.77839
+Std across folds: n/a (meta-model grid)
+Naive baseline: 0.70900
+Hypothesis: A regularized LightGBM meta-model on the 34 meta features can capture
+  non-linear interactions between base model probabilities that LogisticRegression
+  cannot. Heavy regularization (reg_lambda=20, min_child_samples=200, small num_leaves)
+  should prevent OOF overfitting.
+Changes vs attempt-23:
+  - Replaced LogisticRegression meta-model with LightGBM (3-config grid: leaves 7/15/31)
+  - Common params: lr=0.02, n_estimators=3000, subsample=0.8, colsample_bytree=0.8,
+    reg_lambda=20, reg_alpha=5, min_child_samples=200, early_stopping_rounds=100
+  - Multiplier search: c1 in [1.20, 1.90], c2 in [0.80, 1.15], step 0.01
+
+Result:
+  Tuned OOF 0.75623 — massive PASS (+0.01640 vs attempt-23's 0.73983). Public 0.77839
+  is a new best (+0.00970 over attempt-23's 0.76869). LightGBM on 34 meta features
+  dramatically outperforms LogisticRegression — the non-linear interactions between
+  base model confidence, agreement, and class probabilities carry substantial signal
+  that a linear model cannot capture. This is the biggest single-attempt gain of the
+  competition.
+
+Confusion matrix: not captured
+Per-class recall: not captured
+Verdict: PASS — new best OOF 0.75623, new best public 0.77839 (+0.00970).
+Next attempt should try: Grid search more LGB meta configs with less regularization
+  (num_leaves up to 63, reg_lambda as low as 5) and wider multiplier range now that
+  the meta-model calibrates class-1 differently from LogReg.
+
+---
+
 ## attempt-23: Blend attempt-21 and attempt-22 stack probabilities — PASS
 
 Branch: improve/attempt-23-blend-stack-versions
