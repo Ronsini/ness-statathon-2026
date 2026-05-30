@@ -1,0 +1,442 @@
+---
+title: "Policy Retention Modeling for Travelers Insurance"
+subtitle: "2026 NESS Statathon Finalist Presentation"
+author: "Ronnie Orsini | Orsini Analytics | University of Connecticut"
+format:
+  revealjs:
+    theme: moon
+    transition: slide
+    slide-number: true
+    footer: "Orsini Analytics | Ronnie Orsini | University of Connecticut"
+    fig-width: 8
+    fig-height: 2.6
+    auto-stretch: false
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{python}
+#| label: setup
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+ROOT  = Path("..")
+DATA  = ROOT / "data"
+
+plt.rcParams.update({"figure.dpi": 110, "font.size": 10})
+
+train = pd.read_csv(DATA / "train.csv")
+test  = pd.read_csv(DATA / "test.csv")
+train = train[train["cancel"].isin([0, 1, 2])].copy()
+```
+
+---
+
+## Competition Objective
+
+Build a multiclass retention model for Travelers Insurance to:
+
+1. Identify policies likely to cancel
+2. Understand the key drivers of cancellation risk
+3. Recommend how Travelers could use the model to improve retention
+
+::: {.notes}
+The main business problem is policy retention. Travelers wants to know which policies are likely to cancel 
+before the end of their term. But the goal is not just prediction — it is understanding the key factors driving 
+cancellation and using those results in practice. Class 1 is especially important because those customers are realistic candidates for retention outreach.
+:::
+
+---
+
+## Data Overview
+
+```{python}
+#| label: class-dist
+vc     = train["cancel"].value_counts().sort_index()
+labels = ["Class 0\nWill not cancel", "Class 1\nMay cancel", "Class 2\nWill cancel"]
+colors = ["#4C8BB5", "#E8A040", "#C0392B"]
+pcts   = vc.values / vc.sum() * 100
+
+fig, ax = plt.subplots(figsize=(8, 2.6))
+bars = ax.bar(labels, pcts, color=colors, edgecolor="white", linewidth=1.5, width=0.5)
+for bar, pct, cnt in zip(bars, pcts, vc.values):
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+            f"{pct:.1f}%\n({cnt:,})", ha="center", va="bottom", fontsize=9.5)
+ax.set_ylabel("Share (%)")
+ax.set_ylim(0, 85)
+ax.spines[["top", "right"]].set_visible(False)
+plt.tight_layout()
+plt.show()
+```
+
+Each row represents a policy record for a given policy year/term 2013 through 2017.
+
+The data includes:
+- Policyholder info: age, gender, marital status, credit
+- Policy info: premium, tenure, coverage type, claim indicator
+- Property info: dwelling type, square footage, house color
+- Timing info: year, renewal season, quote weekday
+- Sales/geography: sales channel, zip code
+
+::: {.notes}
+The dataset is historical policy data from Travelers. Each row represents a property insurance policy 
+record for a given policy year or term. The variables include policyholder information, policy details, 
+property characteristics, timing variables like year and renewal season, and sales/geographic information 
+like sales channel and zip code. The goal is to use these historical records to predict whether a future
+policy will renew, may cancel but can be convinced, or will cancel.
+:::
+
+---
+
+## Key Patterns in the Data
+
+```{python}
+#| label: eda-credit
+credit_order = ["low", "medium", "high"]
+grp = (
+    train.groupby("credit")["cancel"]
+    .value_counts(normalize=True).unstack(fill_value=0)
+    .reindex(credit_order) * 100
+)
+chan_grp = (
+    train.groupby("sales.channel")["cancel"]
+    .value_counts(normalize=True).unstack(fill_value=0) * 100
+)
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 2.5))
+x  = np.arange(3); w = 0.25
+colors_c = ["#4C8BB5", "#E8A040", "#C0392B"]
+for i, (cls, lbl, col) in enumerate(zip([0,1,2], ["Class 0","Class 1","Class 2"], colors_c)):
+    axes[0].bar(x + i*w, grp[cls], w, label=lbl, color=col, edgecolor="white")
+axes[0].set_xticks(x + w); axes[0].set_xticklabels(["Low","Medium","High"])
+axes[0].set_ylabel("% in group"); axes[0].set_title("By Credit Level")
+axes[0].legend(fontsize=7); axes[0].spines[["top","right"]].set_visible(False)
+
+x2 = np.arange(len(chan_grp))
+for i, (cls, col) in enumerate(zip([0,1,2], colors_c)):
+    axes[1].bar(x2 + i*w, chan_grp[cls], w, color=col, edgecolor="white")
+axes[1].set_xticks(x2 + w); axes[1].set_xticklabels(chan_grp.index, fontsize=9)
+axes[1].set_title("By Sales Channel"); axes[1].spines[["top","right"]].set_visible(False)
+
+plt.tight_layout()
+plt.show()
+```
+
+Low credit and Phone/Online channels showed noticeably higher cancellation risk.
+
+
+::: {.notes}
+Before modeling, I looked at target rates to understand which variables were associated with cancellation. 
+Credit level was one of the clearest patterns. Low-credit policies had much higher Class 2 cancellation rates, 
+while high-credit policies were much more likely to renew.
+
+Sales channel showed a similar pattern. Broker policies had lower cancellation risk, while Phone and Online policies 
+had higher cancellation rates. This helped guide variable selection because these variables were both predictive and easy to explain from a business perspective.
+
+It also supported using tree-based models, because cancellation risk seemed to depend on combinations of customer and 
+policy characteristics, not just one simple linear relationship.
+:::
+
+---
+
+## Methods Considered {.smaller}
+
+| Method | Notes |
+|--------|-------|
+| Logistic Regression | Interpretable but misses nonlinear patterns |
+| Random Forest | Handles interactions — slower, lower accuracy here |
+| **XGBoost** | Strong single model — used as base |
+| **LightGBM** | Fast, native categoricals — used as base |
+| **CatBoost** | Best categorical handling — used as base |
+| Soft blending | Weighted probability average — modest gains |
+| **Stacked ensemble** | ✓ Final approach — biggest gains |
+
+Tree-based models fit tabular data with nonlinear interactions. Stacking let the models complement each other.
+
+::: {.notes}
+I considered both simpler interpretable methods and stronger machine learning models. Logistic regression would be 
+easy to explain, but it may miss nonlinear patterns. Tree-based models were a better fit because they handle mixed 
+variable types and capture interactions well. Since individual models made different mistakes, I also considered blending and stacking.
+:::
+
+---
+
+## Model Development Process
+
+```{python}
+#| label: progression
+stages = [
+    ("XGBoost\ntuned",         0.75623),
+    ("XGB + LGB\nstack",       0.76038),
+    ("XGB+LGB+CAT\nstack",     0.76454),
+    ("Stack\nblend",           0.76869),
+    ("LGB\nmeta-stacker",      0.77839),
+]
+names, scores = zip(*stages)
+colors_p = ["#888","#888","#888","#888","#5DA45A"]
+
+fig, ax = plt.subplots(figsize=(9, 2.6))
+bars = ax.bar(names, scores, color=colors_p, edgecolor="white", linewidth=1.5, width=0.55)
+for bar, val in zip(bars, scores):
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.0008,
+            f"{val:.5f}", ha="center", va="bottom", fontsize=9, fontweight="bold")
+ax.set_ylim(0.742, 0.787)
+ax.set_ylabel("Public Accuracy")
+ax.axhline(0.77839, color="#5DA45A", linestyle="--", linewidth=1.2, alpha=0.5)
+ax.spines[["top","right"]].set_visible(False)
+plt.tight_layout()
+plt.show()
+```
+
+Biggest gains came from **stacking**, not from tuning any single model harder.
+
+::: {.notes}
+The strongest single model was XGBoost. But the biggest improvements came from combining models. LightGBM and CatBoost 
+added different prediction patterns. The final jump came from using a LightGBM meta-stacker that learned how to combine the base model probability outputs.
+:::
+
+---
+
+## Final Model: Stacked Ensemble
+
+```{python}
+#| label: flow-diagram
+fig, ax = plt.subplots(figsize=(10, 2.8))
+ax.set_xlim(0, 12); ax.set_ylim(0, 3.8); ax.axis("off")
+
+def draw_box(ax, x, y, w, h, text, color="#4C8BB5", fs=9.5):
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (x, y), w, h, boxstyle="round,pad=0.1",
+        facecolor=color, edgecolor="white", linewidth=1.5, zorder=3))
+    ax.text(x+w/2, y+h/2, text, ha="center", va="center",
+            color="white", fontsize=fs, fontweight="bold", zorder=4)
+
+def arrow(ax, x1, y1, x2, y2):
+    ax.annotate("", xy=(x2,y2), xytext=(x1,y1),
+                arrowprops=dict(arrowstyle="->", color="#aaa", lw=1.8))
+
+draw_box(ax, 0.1, 1.2, 1.7, 1.0, "Policy\nData", color="#555")
+
+draw_box(ax, 2.4, 2.7, 2.0, 0.75, "XGBoost",  color="#4C8BB5")
+draw_box(ax, 2.4, 1.45, 2.0, 0.75, "LightGBM", color="#4C8BB5")
+draw_box(ax, 2.4, 0.2,  2.0, 0.75, "CatBoost", color="#4C8BB5")
+
+ax.text(3.4, 3.6, "Base Models",                    ha="center", color="#bbb", fontsize=8.5)
+ax.text(3.4, -0.1,"Each → 3 class probabilities",   ha="center", color="#999", fontsize=7.5)
+
+for y_t in [3.05, 1.82, 0.57]:
+    arrow(ax, 1.8, 1.7, 2.4, y_t)
+
+draw_box(ax, 5.8, 1.2, 2.4, 1.0, "LightGBM\nMeta-Stacker", color="#E8A040")
+ax.text(7.0, 3.6,  "Meta-Model",                             ha="center", color="#bbb", fontsize=8.5)
+ax.text(7.0, -0.1, "Learns agreement & confidence",          ha="center", color="#999", fontsize=7.5)
+
+for y_t in [3.05, 1.82, 0.57]:
+    arrow(ax, 4.4, y_t, 5.8, 1.7)
+
+draw_box(ax, 9.4, 1.2, 2.3, 1.0, "Final\nPrediction", color="#5DA45A")
+arrow(ax, 8.2, 1.7, 9.4, 1.7)
+
+plt.tight_layout()
+plt.show()
+```
+
+5-fold out-of-fold CV — the meta-model never trains on rows it helped predict.
+
+::: {.notes}
+Instead of taking one model's prediction, I trained XGBoost, LightGBM, and CatBoost to each produce class probabilities. 
+Those probabilities became inputs to a LightGBM meta-model, which learned when to trust each base model and how to handle disagreement between them.
+:::
+
+---
+
+## Why Stacking Worked Best
+
+A **probability** carries more information than a hard class label.
+
+> **Example:** XGBoost says 45% class 0, LightGBM says 60% class 0, CatBoost says 52% class 1.
+> A blend averages these. The meta-stacker learned that CatBoost's class-1 signal + the others' uncertainty is a meaningful pattern.
+
+- The meta-model also saw confidence (max prob, top-2 margin) and cross-model agreement
+- 34 engineered meta-features in total
+
+**Result:** Class-1 recall improved from 56.9% → **69.3%** in one step.
+
+::: {.notes}
+A hard prediction only says which class the model picked. Probabilities show confidence. The stacker used those probability
+ patterns, plus features like whether models agreed or disagreed, to make a better final decision.
+:::
+
+---
+
+## Variable Selection {.smaller}
+
+**Key predictors** (consistent across EDA, CV importance, and all three models):
+
+`credit` · `sales.channel` · `zip.code` · `ni.age` · `premium` · `tenure` · `coverage.type` · `dwelling.type`
+
+**Feature engineering:**
+
+| Model | Approach |
+|-------|----------|
+| XGBoost | Numeric encoding, 6 missingness flags, OOF zip/age×credit target encodings |
+| LightGBM | Native categorical splits, same missingness + OOF encodings |
+| CatBoost | Ordered boosting on raw categoricals via Pool API |
+| Meta-model | 34 features: raw probs + confidence (max, margin) + cross-model agreement |
+
+::: {.notes}
+I did not manually remove many variables early because tree-based models can handle a fairly wide set of predictors. 
+Instead, I used EDA, validation performance, and model behavior to decide which were important. Credit, sales channel, 
+zip code, age, premium, and tenure repeatedly showed meaningful signal. For stacking, I also engineered meta-features 
+such as model confidence, top-two class margin, and cross-model agreement.
+:::
+
+---
+
+## Final Results
+
+```{python}
+#| label: final-results
+results = pd.DataFrame([
+    {"Stage": "XGBoost",              "Score": 0.75623},
+    {"Stage": "XGB + LGB",            "Score": 0.76038},
+    {"Stage": "XGB + LGB + CAT",      "Score": 0.76454},
+    {"Stage": "Blend",                "Score": 0.76869},
+    {"Stage": "LGB meta-stacker",     "Score": 0.77839},
+])
+cm = np.array([[682707,22591,35691],[23104,52229,34],[162238,11112,55417]])
+cm_norm  = cm / cm.sum(axis=1, keepdims=True)
+recalls  = cm.diagonal() / cm.sum(axis=1)
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 2.8))
+
+colors_r = ["#888"]*4 + ["#5DA45A"]
+bars = axes[0].barh(results["Stage"], results["Score"],
+                    color=colors_r, edgecolor="white", linewidth=1.2)
+for bar, val in zip(bars, results["Score"]):
+    axes[0].text(val+0.0005, bar.get_y()+bar.get_height()/2,
+                 f"{val:.5f}", va="center", fontsize=8.5, fontweight="bold")
+axes[0].set_xlim(0.740, 0.793)
+axes[0].set_xlabel("Public Accuracy")
+axes[0].set_title("Public Leaderboard Score")
+axes[0].spines[["top","right"]].set_visible(False)
+
+axes[1].imshow(cm_norm, cmap="Blues", vmin=0, vmax=1)
+axes[1].set_xticks(range(3)); axes[1].set_yticks(range(3))
+axes[1].set_xticklabels(["Pred 0","Pred 1","Pred 2"])
+axes[1].set_yticklabels(["True 0","True 1","True 2"])
+axes[1].set_title(
+    f"OOF Confusion Matrix\n"
+    f"C0={recalls[0]*100:.0f}%  C1={recalls[1]*100:.0f}%  C2={recalls[2]*100:.0f}%")
+for i in range(3):
+    for j in range(3):
+        col = "white" if cm_norm[i,j] > 0.5 else "black"
+        axes[1].text(j, i, f"{cm_norm[i,j]*100:.0f}%",
+                     ha="center", va="center", color=col, fontsize=11, fontweight="bold")
+plt.tight_layout()
+plt.show()
+```
+
+**Final public score: 0.77839 &nbsp;·&nbsp; Private score: 0.76941 &nbsp;·&nbsp; 3rd place**
+
+::: {.notes}
+The final model scored 0.77839 on the public leaderboard and 0.76941 on the private leaderboard, placing 3rd. The main improvement came from moving from a 
+single model to a stacked ensemble. This shows that the models had complementary information that no single model could fully capture on its own.
+:::
+
+---
+
+## Key Drivers of Cancellation Risk
+
+```{python}
+#| label: drivers
+drivers = [
+    ("credit",        0.92), ("sales.channel", 0.81),
+    ("zip.code",      0.74), ("ni.age",         0.68),
+    ("premium",       0.61), ("tenure",         0.57),
+    ("coverage.type", 0.49), ("dwelling.type",  0.38),
+]
+names_d, imp_d = zip(*drivers)
+colors_d = ["#4C8BB5" if i < 4 else "#7aaecc" for i in range(len(names_d))]
+
+fig, ax = plt.subplots(figsize=(9, 2.6))
+ax.barh(names_d[::-1], imp_d[::-1], color=colors_d[::-1], edgecolor="white")
+ax.set_xlabel("Relative Importance (normalized)")
+ax.set_xlim(0, 1.1)
+ax.spines[["top","right"]].set_visible(False)
+plt.tight_layout()
+plt.show()
+```
+
+Low credit, Phone/Online channels, younger age, and geography — all interpretable and actionable.
+
+::: {.notes}
+The main drivers were consistent with the EDA. Low credit policies were much more likely to cancel. Phone and Online 
+channels had higher cancellation risk than Broker. Younger customers also showed higher cancellation. Zip code captured 
+geographic differences, which may represent regional market or demographic differences. These variables are useful because they are interpretable and actionable.
+:::
+
+---
+
+## How Travelers Could Use the Model {.smaller}
+
+| Class | Prediction | Recommended Action |
+|-------|-----------|-------------------|
+| **0** | Will not cancel | Standard renewal — no intervention needed |
+| **1** | May cancel — can be convinced | **Priority outreach** — discount, coverage review |
+| **2** | Will cancel | Deeper review — pricing, pain points, coverage fit |
+
+**Class 1 is the highest-value group for retention ROI.** These customers have not decided to leave yet — outreach can still change the outcome.
+
+Class 2 needs a different strategy; Class 0 does not need expensive resources.
+
+::: {.notes}
+The model should not just be used to label customers — it should help Travelers decide where to spend retention resources. 
+Class 1 is especially valuable because those customers may still be convinced to stay. Class 2 customers are higher risk 
+and may need different intervention, while Class 0 customers likely do not need expensive outreach.
+:::
+
+---
+
+## Additional Variables That Could Help {.smaller}
+
+Current data captures demographics and policy characteristics — but not *behavior or intent*.
+
+| Variable | Why it would help |
+|----------|------------------|
+| Renewal premium change | Customers often cancel when price increases |
+| Payment history / late payments | Financial stress is a strong signal |
+| Prior cancellation history | Past behavior is the best predictor |
+| Claims amount and severity | Dissatisfied claimants are more likely to leave |
+| Customer service contacts | Frequent callers are uncertain — likely Class 1 |
+
+**Limitations:** predictive, not causal. Class 1 is rare and harder to predict. Behavioral variables were not available in this dataset.
+
+::: {.notes}
+The most useful missing variable would likely be renewal premium change, because customers often cancel when their price 
+increases. Payment behavior, complaints, claim severity, and customer engagement would also help. The current model is 
+useful for prediction, but should be validated before production use and paired with business judgment.
+:::
+
+---
+
+## Conclusion
+
+**3rd place &nbsp;·&nbsp; Public: 0.77839 &nbsp;·&nbsp; Private: 0.76941**
+
+- Credit, sales channel, age, zip code, and premium are the strongest cancellation signals
+- Stacking three diverse models outperformed any single model
+- Class 1 ("may cancel") is where retention outreach has the highest expected impact
+- Adding behavioral data — payment history, claims, customer contacts — would improve predictions further
+
+*The model provides both the accuracy and the insight Travelers needs to focus retention resources where they matter most.*
+
+::: {.notes}
+The final model improved over individual models and gave useful segmentation of cancellation risk. The most important 
+business value is helping Travelers focus on the customers where outreach could make the biggest difference.
+:::

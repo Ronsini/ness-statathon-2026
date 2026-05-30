@@ -1,0 +1,7 @@
+Baseline — attempt-14 params on 350,000 rows / 3-fold
+Run date: 2026-05-13 22:44
+Fold scores: fold1=0.72273  fold2=0.72249  fold3=0.72331
+Raw OOF accuracy:   0.72285
+Tuned OOF accuracy: 0.72562
+Best multipliers:   c0x1.000  c1x0.300  c2x0.900
+Runtime: 246s

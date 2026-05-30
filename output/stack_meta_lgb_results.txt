@@ -1,0 +1,27 @@
+leaves=7 depth=3           raw=0.75606  tuned=0.75606  c1=1.000  c2=1.000
+leaves=15 depth=4          raw=0.75623  tuned=0.75623  c1=1.000  c2=1.000
+leaves=31 depth=5          raw=0.75616  tuned=0.75616  c1=1.000  c2=1.000
+
+=========================================================================================================
+Best config:   leaves=15 depth=4
+Raw OOF:       0.75623
+Tuned OOF:     0.75623
+Multipliers:   c0x1.00  c1x1.000  c2x1.000
+
+Per-class recall:  class-0: 92.1%  class-1: 69.3%  class-2: 24.2%
+
+Baselines:
+  attempt-21 OOF  : 0.73856  public: 0.76454
+  attempt-22       public: 0.76315
+  attempt-23 OOF  : 0.73983  public: 0.76869
+
+Verdict: BEATS attempt-23 OOF by +0.01640
+
+Test prediction dist: class-0: 2003 (83.0%)  class-1: 199 (8.3%)  class-2: 210 (8.7%)
+
+Confusion matrix (rows=true, cols=pred):
+        pred_0  pred_1  pred_2
+true_0  682707   22591   35691
+true_1   23104   52229      34
+true_2  162238   11112   55417
+=========================================================================================================

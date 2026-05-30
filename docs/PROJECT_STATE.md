@@ -1,10 +1,12 @@
-# Project State (last updated 2026-05-15)
+# Project State (last updated 2026-05-30)
 
-## Current best
+## FINAL RESULT — Competition complete
 
+**3rd place finish**
 Branch: improve/attempt-24-lgb-meta-stacker
-CV accuracy: 0.75623 (tuned)
-Public leaderboard: 0.77839
+CV accuracy: 0.75623 (tuned OOF)
+Public leaderboard (30% test): 0.77839
+**Private leaderboard (70% test — final): 0.76941**
 Submission file: output/submission_stack_meta_lgb.csv
 
 ## Pipeline summary (attempt-24)

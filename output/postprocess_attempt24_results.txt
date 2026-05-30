@@ -1,0 +1,11 @@
+Base OOF accuracy: 0.75623
+Base test dist: c0=2003  c1=199  c2=210
+
+Best A: thr=6  p2_min=0.15  margin=0.07  oof_acc=0.75625  gain=+0.00002
+
+rank  description          oof_acc      gain  oof_flip  tst_flip  test_dist
+------------------------------------------------------------------------------------------
+   1  A only               0.75625  +0.00002       313         1  c0=2002  c1=199  c2=211
+   2  BASE (no postprocess)   0.75623  +0.00000         0         0  c0=2003  c1=199  c2=210
+
+Verdict: BEATS attempt-24 OOF by +0.00002
