@@ -1,0 +1,56 @@
+Optuna XGBoost search — 2026-05-13 19:05
+SAMPLE_N=350,000  N_FOLDS=3  N_TRIALS=40
+----------------------------------------------------------------------------------------------------
+Trial   0 | raw=0.72337 tuned=0.72760 | c1x0.300 c2x0.830 | lr=0.0235 depth=9 mcw=24 sub=0.85 csb=0.74 lam=1.432 alp=0.116 gam=2.599 bin=256
+Trial   1 | raw=0.72407 tuned=0.72600 | c1x0.300 c2x0.850 | lr=0.0482 depth=9 mcw=10 sub=0.75 csb=0.75 lam=2.015 alp=1.050 gam=1.296 bin=256
+Trial   2 | raw=0.72239 tuned=0.72545 | c1x0.300 c2x0.890 | lr=0.0213 depth=6 mcw=16 sub=0.90 csb=0.75 lam=3.268 alp=1.185 gam=0.139 bin=128
+Trial   3 | raw=0.72321 tuned=0.72511 | c1x0.300 c2x0.870 | lr=0.0470 depth=9 mcw=26 sub=0.78 csb=0.72 lam=4.833 alp=0.880 gam=0.366 bin=512
+Trial   4 | raw=0.72291 tuned=0.72759 | c1x0.300 c2x0.880 | lr=0.0205 depth=8 mcw=13 sub=0.83 csb=0.84 lam=1.531 alp=1.939 gam=2.325 bin=128
+Trial   5 | raw=0.72196 tuned=0.72754 | c1x0.300 c2x0.830 | lr=0.0455 depth=5 mcw=10 sub=0.71 csb=0.78 lam=2.447 alp=0.543 gam=2.486 bin=512
+Trial   6 | raw=0.72392 tuned=0.72713 | c1x0.300 c2x0.850 | lr=0.0178 depth=9 mcw=6 sub=0.95 csb=0.89 lam=1.580 alp=0.011 gam=2.446 bin=512
+Trial   7 | raw=0.72219 tuned=0.72716 | c1x0.300 c2x0.890 | lr=0.0164 depth=6 mcw=8 sub=0.92 csb=0.86 lam=2.142 alp=0.127 gam=0.933 bin=256
+Trial   8 | raw=0.72261 tuned=0.72707 | c1x0.300 c2x0.840 | lr=0.0437 depth=7 mcw=8 sub=0.88 csb=0.89 lam=3.641 alp=1.542 gam=1.481 bin=128
+Trial   9 | raw=0.72172 tuned=0.72667 | c1x0.300 c2x0.870 | lr=0.0171 depth=5 mcw=21 sub=0.78 csb=0.83 lam=8.083 alp=0.499 gam=1.231 bin=128
+Trial  10 | raw=0.72287 tuned=0.72771 | c1x0.300 c2x0.880 | lr=0.0292 depth=8 mcw=30 sub=0.84 csb=0.70 lam=1.093 alp=0.511 gam=2.928 bin=256
+Trial  11 | raw=0.72273 tuned=0.72777 | c1x0.300 c2x0.900 | lr=0.0294 depth=8 mcw=30 sub=0.84 csb=0.71 lam=1.043 alp=0.446 gam=2.985 bin=256
+Trial  12 | raw=0.72284 tuned=0.72788 | c1x0.300 c2x0.830 | lr=0.0330 depth=8 mcw=30 sub=0.80 csb=0.71 lam=1.110 alp=0.652 gam=2.985 bin=256
+Trial  13 | raw=0.72340 tuned=0.72733 | c1x0.300 c2x0.860 | lr=0.0329 depth=8 mcw=30 sub=0.80 csb=0.79 lam=1.061 alp=0.751 gam=1.925 bin=256
+Trial  14 | raw=0.72240 tuned=0.72785 | c1x0.300 c2x0.880 | lr=0.0361 depth=7 mcw=26 sub=0.80 csb=0.95 lam=1.045 alp=0.667 gam=2.984 bin=256
+Trial  15 | raw=0.72304 tuned=0.72733 | c1x0.300 c2x0.850 | lr=0.0374 depth=7 mcw=25 sub=0.80 csb=0.94 lam=9.609 alp=1.338 gam=2.012 bin=256
+Trial  16 | raw=0.72186 tuned=0.72703 | c1x0.300 c2x0.880 | lr=0.0369 depth=6 mcw=20 sub=0.75 csb=0.78 lam=5.636 alp=0.735 gam=1.958 bin=256
+Trial  17 | raw=0.72249 tuned=0.72773 | c1x0.300 c2x0.850 | lr=0.0371 depth=7 mcw=26 sub=0.75 csb=0.90 lam=1.359 alp=0.328 gam=2.832 bin=256
+Trial  18 | raw=0.72268 tuned=0.72569 | c1x0.300 c2x0.860 | lr=0.0259 depth=7 mcw=23 sub=0.81 csb=0.85 lam=2.681 alp=0.776 gam=0.687 bin=256
+Trial  19 | raw=0.72302 tuned=0.72735 | c1x0.300 c2x0.860 | lr=0.0330 depth=8 mcw=28 sub=0.87 csb=0.94 lam=1.725 alp=1.549 gam=2.223 bin=512
+Trial  20 | raw=0.72241 tuned=0.72636 | c1x0.300 c2x0.940 | lr=0.0408 depth=7 mcw=18 sub=0.70 csb=0.80 lam=1.196 alp=1.026 gam=1.796 bin=256
+Trial  21 | raw=0.72265 tuned=0.72775 | c1x0.300 c2x0.890 | lr=0.0292 depth=8 mcw=28 sub=0.82 csb=0.70 lam=1.059 alp=0.279 gam=2.942 bin=256
+Trial  22 | raw=0.72272 tuned=0.72770 | c1x0.300 c2x0.820 | lr=0.0332 depth=8 mcw=28 sub=0.78 csb=0.72 lam=1.283 alp=0.584 gam=2.690 bin=256
+Trial  23 | raw=0.72293 tuned=0.72757 | c1x0.300 c2x0.870 | lr=0.0268 depth=8 mcw=30 sub=0.86 csb=0.76 lam=1.851 alp=0.330 gam=2.719 bin=256
+Trial  24 | raw=0.72228 tuned=0.72810 | c1x0.300 c2x0.870 | lr=0.0305 depth=6 mcw=22 sub=0.82 csb=0.81 lam=1.053 alp=0.649 gam=2.991 bin=256
+Trial  25 | raw=0.72219 tuned=0.72759 | c1x0.300 c2x0.890 | lr=0.0404 depth=6 mcw=22 sub=0.82 csb=0.81 lam=1.252 alp=0.922 gam=2.215 bin=256
+Trial  26 | raw=0.72212 tuned=0.72799 | c1x0.300 c2x0.880 | lr=0.0337 depth=6 mcw=19 sub=0.79 csb=0.87 lam=1.498 alp=0.652 gam=2.654 bin=256
+Trial  27 | raw=0.72219 tuned=0.72793 | c1x0.300 c2x0.880 | lr=0.0245 depth=5 mcw=16 sub=0.77 csb=0.88 lam=2.298 alp=1.136 gam=2.642 bin=256
+Trial  28 | raw=0.72184 tuned=0.72811 | c1x0.300 c2x0.920 | lr=0.0237 depth=5 mcw=15 sub=0.76 csb=0.87 lam=2.364 alp=1.188 gam=2.624 bin=128
+Trial  29 | raw=0.72204 tuned=0.72785 | c1x0.300 c2x0.880 | lr=0.0223 depth=5 mcw=19 sub=0.72 csb=0.91 lam=4.029 alp=1.336 gam=2.520 bin=128
+Trial  30 | raw=0.72239 tuned=0.72696 | c1x0.300 c2x0.870 | lr=0.0236 depth=6 mcw=14 sub=0.76 csb=0.87 lam=2.716 alp=1.286 gam=1.665 bin=128
+Trial  31 | raw=0.72205 tuned=0.72830 | c1x0.300 c2x0.870 | lr=0.0247 depth=5 mcw=16 sub=0.76 csb=0.87 lam=2.474 alp=1.164 gam=2.700 bin=128
+Trial  32 | raw=0.72206 tuned=0.72795 | c1x0.300 c2x0.910 | lr=0.0194 depth=5 mcw=16 sub=0.73 csb=0.85 lam=1.873 alp=1.572 gam=2.655 bin=128
+Trial  33 | raw=0.72209 tuned=0.72769 | c1x0.300 c2x0.900 | lr=0.0254 depth=6 mcw=13 sub=0.79 csb=0.87 lam=2.966 alp=0.907 gam=2.207 bin=128
+Trial  34 | raw=0.72204 tuned=0.72809 | c1x0.300 c2x0.900 | lr=0.0275 depth=5 mcw=18 sub=0.76 csb=0.81 lam=2.063 alp=1.135 gam=2.385 bin=128
+Trial  35 | raw=0.72231 tuned=0.72806 | c1x0.300 c2x0.900 | lr=0.0222 depth=5 mcw=15 sub=0.76 csb=0.82 lam=3.366 alp=1.168 gam=2.819 bin=128
+Trial  36 | raw=0.72207 tuned=0.72776 | c1x0.300 c2x0.930 | lr=0.0285 depth=5 mcw=12 sub=0.73 csb=0.84 lam=4.362 alp=1.434 gam=2.393 bin=128
+Trial  37 | raw=0.72195 tuned=0.72784 | c1x0.300 c2x0.870 | lr=0.0194 depth=5 mcw=18 sub=0.75 csb=0.83 lam=2.195 alp=1.746 gam=2.473 bin=128
+Trial  38 | raw=0.72178 tuned=0.72785 | c1x0.300 c2x0.850 | lr=0.0310 depth=5 mcw=11 sub=0.77 csb=0.80 lam=2.550 alp=1.072 gam=2.125 bin=128
+Trial  39 | raw=0.72213 tuned=0.72803 | c1x0.300 c2x0.860 | lr=0.0240 depth=6 mcw=17 sub=0.72 csb=0.92 lam=2.951 alp=1.266 gam=2.776 bin=128
+----------------------------------------------------------------------------------------------------
+Best trial: 31  tuned_acc=0.72830
+Best params: {
+  "learning_rate": 0.024701167309159326,
+  "max_depth": 5,
+  "min_child_weight": 16,
+  "subsample": 0.7624914057708336,
+  "colsample_bytree": 0.8745917491919075,
+  "reg_lambda": 2.474141098010141,
+  "reg_alpha": 1.163515452183569,
+  "gamma": 2.7002054582222734,
+  "max_bin": 128
+}

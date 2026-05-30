@@ -2,66 +2,88 @@
 
 **Competition:** [2026 NESS Statathon — Travelers Policy Retention](https://www.kaggle.com/competitions/2026-ness-statathon)
 
+**Final result: 3rd place &nbsp;·&nbsp; Private leaderboard accuracy: 0.76941**
+
 ## Problem
 
 Predict whether a Travelers property insurance policy will be:
-- **0** — Not cancelled (renews)
-- **1** — May cancel but can be convinced to stay
-- **2** — Will cancel
+- **0** — Will not cancel (~71% of training data)
+- **1** — May cancel but can be convinced to stay (~7%)
+- **2** — Will cancel (~22%)
 
-Training data is ~1M policies from 2013–2017 with the cancellation outcome labeled. Test data is 2,412 policies where the outcome is hidden. Evaluation metric is **accuracy**, with a public/private split (30%/70%).
+Training data: 1,045,123 policies from 2013–2017 with cancellation outcome labeled.
+Test data: 2,412 policies with hidden outcomes.
+Evaluation metric: **accuracy** (public/private split: 30%/70%).
 
-## Goals
+## Final Model
 
-1. Identify policies likely to be cancelled before end of term
-2. Understand key drivers of cancellation
-3. Provide actionable recommendations for Travelers
+A three-layer stacked ensemble:
 
-## Approach
+1. **Base models** (trained with 5-fold out-of-fold CV):
+   - XGBoost — 91 features, numeric preprocessing, OOF target encodings
+   - LightGBM — 56 features, native categoricals, 6 missingness flags, OOF encodings
+   - CatBoost — same feature set as LightGBM, native categorical handling via Pool API
 
-1. **EDA** — class balance, missingness, feature distributions, cancellation rates by feature
-2. **Preprocessing** — handle ~0.1% missingness, encode 9 categorical features, drop ~0.3% of rows where `cancel = -1`
-3. **Feature engineering** — household size, premium-per-sqft, claim×tenure interactions, target encoding on high-cardinality features (zip, email)
-4. **Model** — LightGBM with 5-fold stratified cross-validation
-5. **Validation** — trust local CV over public leaderboard (which is only 30% of test set)
+2. **Meta-model** — LightGBM trained on 34 meta-features:
+   - 9 raw class probabilities (3 per base model)
+   - 25 derived features: max prob, top-2 margin, argmax per model, cross-model agreement indicators, vote counts, mean/std/range per class
+
+All base models use 5-fold StratifiedKFold. The meta-model is trained on OOF predictions only — it never sees a row it helped predict.
+
+## Score Progression
+
+| Stage | Public (30%) | Private (70%) |
+|-------|-------------|---------------|
+| LGB baseline | 0.74099 | 0.74570 |
+| XGBoost (best single model) | 0.75623 | 0.74629 |
+| XGB + LGB logistic stack | 0.76038 | 0.74807 |
+| XGB + LGB + CatBoost stack | 0.76454 | 0.74214 |
+| Stack blend | 0.76869 | 0.74096 |
+| **LGB meta-stacker (final)** | **0.77839** | **0.76941** |
+
+The blending steps overfit the public leaderboard — private scores dipped even as public improved. The LGB meta-stacker was the only step that lifted both.
 
 ## Repository Structure
 
 ```
 .
-├── data/             # train.csv, test.csv (gitignored — download from Kaggle)
-├── src/              # Python scripts
-│   ├── eda.py            # exploratory data analysis
-│   ├── train_model.py    # main training pipeline
-│   └── make_submission.py # generate Kaggle submission CSV
-├── notebooks/        # Jupyter / Quarto notebooks
-├── output/           # submission CSVs, saved models
-└── docs/             # presentation slides, write-ups
+├── data/                       # train.csv, test.csv (gitignored — download from Kaggle)
+├── src/                        # Training and stacking scripts
+│   ├── train_model.py              # LightGBM base model
+│   ├── save_xgb_probs.py           # XGBoost base model (attempt-14)
+│   ├── save_cat_probs.py           # CatBoost base model (attempt-21)
+│   ├── stack_meta_lgb.py           # LGB meta-stacker — final submission (attempt-24)
+│   ├── feature_leak_audit.py       # EDA audit script (attempt-25)
+│   └── postprocess_attempt24.py    # Rule-based postprocessing (attempt-27)
+├── output/                     # Submission CSVs, saved OOF/test probability arrays
+├── report/                     # Quarto presentation (competition-report.qmd)
+├── docs/                       # Attempt history, project state, notes
+└── requirements.txt
 ```
 
-## Reproducing Results
+## Reproducing the Final Submission
 
 ```bash
-# 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Place train.csv and test.csv in data/
+# Place train.csv and test.csv in data/
 
-# 3. Run pipeline
-python src/eda.py              # generate EDA summary
-python src/train_model.py      # train model + 5-fold CV
-python src/make_submission.py  # generate submission.csv in output/
+# Step 1: Train base models and save OOF + test probability arrays
+python src/train_model.py          # LightGBM → lgb_oof_probs.npy, lgb_test_probs.npy
+python src/save_xgb_probs.py       # XGBoost  → xgb_oof_probs.npy, xgb_test_probs.npy
+python src/save_cat_probs.py       # CatBoost → cat_oof_probs.npy, cat_test_probs.npy
+
+# Step 2: Train LGB meta-stacker and generate final submission
+python src/stack_meta_lgb.py       # → output/submission_stack_meta_lgb.csv
 ```
 
-## Current Results
+## Key Findings
 
-| Branch | Model | 5-fold CV Accuracy | Notes |
-|--------|-------|--------------------|-------|
-| `main` | Naive baseline (predict all 0) | 0.7099 | — |
-| `main` | LightGBM baseline (300k sample) | 0.7257 | num_leaves=31, lr=0.1, 300 rounds |
-| `improve/full-data-tuned` | LightGBM (full 1M rows) | 0.7253 | num_leaves=255, lr=0.05, early stop ~350-480 rounds, 37 features incl. zip categorical + group ratios |
-| `improve/slower-deeper-oof-encoding` | LightGBM (slower, deeper) | 0.7260 | num_leaves=127, lr=0.02, early stop ~1780-2102 rounds, 38 features incl. OOF zip encoding + credit ordinal |
+- **Credit level** is the strongest cancellation signal — low-credit policies cancel at 2.5× the rate of high-credit policies
+- **Sales channel** matters: Phone and Online policies cancel at ~40% vs ~22% for Broker
+- **Class 1** (may cancel) is the most valuable group for retention outreach — customers who have not decided to leave yet
+- **Stacking > blending**: non-linear interactions between base model probabilities carry signal that linear meta-models cannot capture
 
-## Team
+## Author
 
-Ronsini — NESS Statathon 2026
+Ronnie Orsini — University of Connecticut, NESS Statathon 2026
